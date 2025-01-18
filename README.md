@@ -1,64 +1,242 @@
-# Manage Hosts Script
+# Manage Hosts
 
-A robust Python script to manage a list of hosts, PDUs, UPS devices, routers, switches, and more. This script supports filtering endpoints by tags or device type, establishing SSH connections with multiple credentials, shutting down endpoints, executing arbitrary commands, and reflecting on dependencies (such as UPS, PDU, host dependencies) with a depth-based approach.
+A robust, concurrent Python application for managing and controlling hosts, PDUs (Power Distribution Units), UPSes (Uninterruptible Power Supplies), routers, switches, firewalls, and more. It supports tag-based filtering, dependency ordering (depth-based), SSH command execution, and network pings. This project is hosted on GitHub at:  
+<https://github.com/aperim/manage-hosts>
 
-This script is suitable for both macOS (Darwin) and Linux-based operating systems. It uses Python 3.9+ features and is designed following (as closely as possible) the Google Python Style Guide.
+---
 
---------------------------------------------------------------------------------
-## Key Functionality
+• Author: Troy Kelly  
+• Company: Aperim Pty Ltd  
+• Date: 18 Jan 2025  
+• License: Apache 2.0  
 
-1. Configuration Loading from YAML:  
-   • By default, attempts to load "hosts.yaml" in the same directory.  
-   • Can be overridden using the "--config/-c" command-line argument or the MANAGE_HOSTS_CONFIG environment variable.  
-   • Can load from a local file path or an HTTPS URL (HTTP is disallowed).
+---
 
-2. SSH Key Management:  
-   • Private keys can be provided directly in the YAML, via a file reference, or via an environment variable (assumed base64-encoded).  
-   • Multiple SSH credentials can be defined per endpoint, tried in order until one succeeds.
+## Table of Contents
 
-3. Endpoint Inventory:  
-   • Endpoints accept a "type" from the set {host, ups, pdu, router, switch, firewall, storage}.  
-   • Endpoints can define multiple credentials and multiple tags.  
-   • Endpoints can define dependencies on other hosts, UPS systems, and PDUs.  
-   • Depth-based ordering ensures leaf nodes (hosts with no dependencies) get actions first, with parents (more central devices) waiting until children are complete.
+1. [Overview](#overview)  
+2. [Features](#features)  
+3. [Installation & Requirements](#installation--requirements)  
+4. [Usage](#usage)  
+5. [Filter Syntax](#filter-syntax)  
+6. [Examples](#examples)  
+    - [Basic Checks](#basic-checks)  
+    - [Shutdown/Reboot with Default Logic](#shutdownreboot-with-default-logic)  
+    - [Command Execution](#command-execution)  
+    - [Tag-Based Filtering](#tag-based-filtering)  
+    - [Device Type Filtering](#device-type-filtering)  
+    - [Combined Examples](#combined-examples)  
+    - [Run From a Remote Host (Pipe Method)](#run-from-a-remote-host-pipe-method)  
+7. [Configuration File (YAML) Example](#configuration-file-yaml-example)  
+8. [Advanced Usage & Environment Variables](#advanced-usage--environment-variables)  
+9. [License](#license)  
+10. [Contact & Contributing](#contact--contributing)  
 
-4. Overrides for Shutdown and Reboot:  
-   • If an endpoint has an "overrides" entry with a "shutdown" key, that command is used instead of the default "sudo shutdown -h now".  
-   • If an endpoint has an "overrides" entry with a "reboot" key, that command is used instead of the default "sudo shutdown -r now".  
+---
 
-5. Filtering:  
-   • Supports multiple --filter arguments like "--filter location=sy3 --filter critical=true --filter type==router --filter floor>=5".  
-   • Each --filter is combined with a logical AND.  
-   • The following comparators are supported:  
-       ==, !=, <, >, <=, >=, is, is not, in, not in  
-   • When both sides can be parsed as numeric, <, <=, >, >= become numeric comparisons; otherwise they return no match.  
-   • "is" and "is not" act like string equality or inequality.  
-   • "in" and "not in" perform substring membership checks on the endpoint’s string value.  
-   • If you wish to filter by device type, use "type" as the filter key.
+## Overview
 
-6. Threaded Operations:  
-   • The script divides its work among threads, defaulting to (CPU count - 1) or 1 if the CPU count is low.  
-   • Can be overridden via --threads or the MANAGE_HOSTS_THREADS environment variable.  
-   • Endpoints are processed wave-by-wave, from the greatest depth to zero.
+Manage Hosts is a standalone Python 3.9+ script designed to orchestrate and manage diverse endpoints (servers, PDUs, UPSes, routers, switches, firewalls, storage devices) within a hybrid infrastructure. It supports:
 
-7. Reporting:  
-   • By default, output is a colourised, human-friendly ASCII table in the console.  
-   • Use --json or --yaml to get structured JSON or YAML output.  
+• Loading of inline or file-based SSH keys for multiple credentials.  
+• Ordered operations, ensuring child dependencies are handled first.  
+• Threaded execution, controlling concurrency.  
+• Flexible filtering by tags and device type.  
+• Actions including ping checks, SSH checks, command execution, system shutdown, and system reboot.  
 
-8. Operational Modes:  
-   • No options: Perform basic checks (ping + SSH) on each endpoint.  
-   • --test / MANAGE_HOSTS_TEST: Dry run mode, substituting destructive commands with echo statements.  
-   • --shutdown: Gracefully shut down endpoints in descending dependency order, waiting for them to become unreachable.  
-   • --reboot: Gracefully reboot endpoints in descending dependency order, waiting for them to become unreachable.  
-   • --command / -x: Executes an arbitrary command on all endpoints, wave-by-wave.  
+---
 
-   Note: --shutdown and --reboot cannot both be used in the same run.
+## Features
 
---------------------------------------------------------------------------------
-## Example Configuration: hosts.yaml
+1. **Dependency Ordering**:  
+   Endpoints define dependencies (hosts, UPS, PDU), so the script can operate in correct order: leaf nodes first, then their parents, etc.
+
+2. **Filtering**:  
+   The script supports multiple filters like 'location==dc1', 'floor>=3', or 'type is router'. Comparisons can be numeric or string-based.
+
+3. **Threading & Concurrency**:  
+   Multi-threaded to handle large inventories quickly. Defaults to (CPU count - 1) threads if not specified.
+
+4. **Supports Power Devices, Network Devices, Storage**:  
+   Power, network, or storage devices can be excluded by default from shutdown/reboot, unless explicitly included.
+
+5. **Configurable Command Overrides**:  
+   Each endpoint can override the default reboot or shutdown command.  
+
+---
+
+## Installation & Requirements
+
+1. **Python**: Requires Python 3.9+  
+2. **Dependencies**:  
+   - PyYAML  
+   - Paramiko  
+   - Requests  
+   - colorama (optional, for coloured console output)  
+
+To install dependencies using pip:
+
+```bash
+pip install PyYAML paramiko requests colorama
+```
+
+---
+
+## Usage
+
+1. **Local file**:  
+   » python manage_hosts.py --config /path/to/your/hosts.yaml [other options]
+
+2. **HTTPS URL**:  
+   » python manage_hosts.py --config https://example.com/hosts.yaml [other options]
+
+3. **Default configuration**:  
+   If you omit --config, it tries the local file “hosts.yaml” in the same directory, or uses the environment variable MANAGE_HOSTS_CONFIG.
+
+Use --help to see all arguments:
+
+```bash
+python manage_hosts.py --help
+```
+
+Common arguments include:  
+• --filter <filter_expr> : For tag- or type-based filtering (can be repeated).  
+• --shutdown : Shut down matched endpoints in descending dependency order.  
+• --reboot : Reboot matched endpoints in descending dependency order.  
+• --command / -x : Execute a custom command for matched endpoints.  
+• --threads : Concurrency limit.  
+• --test : Dry run mode (will not actually perform destructive actions).  
+• --include-network / --include-storage / --include-power : Include these device classes (router, ups, etc.) during shutdown/reboot.  
+
+---
+
+## Filter Syntax
+
+Filters are specified via --filter command-line flags (or MANAGE_HOSTS_FILTER environment variable), and accept these comparators:
+
+• "==", "!=" — Equality / inequality (numeric or string).  
+• "<", ">", "<=", ">=" — Less-than, greater-than, etc. If both sides can be parsed as numbers, numeric comparison occurs; else comparison fails.  
+• "is", "is not" — String-based strict equality / inequality.  
+• "in", "not in" — Substring membership in the endpoint’s tag string.  
+
+Additionally, you can filter by "type", e.g. "type==router".
+
+---
+
+## Examples
+
+### Basic Checks
+Without specifying shutdown/reboot/command, the script pings and performs a lightweight SSH check on each endpoint, printing a summary:
+
+```bash
+python manage_hosts.py
+```
+
+### Shutdown/Reboot with Default Logic
+Shut down all matched hosts (descending order), excluding routers/switches, storage, and power devices by default:
+
+```bash
+python manage_hosts.py --shutdown
+```
+
+Reboot all matched hosts in descending order:
+
+```bash
+python manage_hosts.py --reboot
+```
+
+To include network and power devices:
+
+```bash
+python manage_hosts.py --shutdown --include-network --include-power
+```
+
+### Command Execution
+Run an arbitrary command across matching hosts in wave order:
+
+```bash
+python manage_hosts.py --command "sudo apt-get update && sudo apt-get upgrade -y"
+```
+
+### Tag-Based Filtering
+Example: Filter by location=“sy3”, and critical endpoints:
+
+```bash
+python manage_hosts.py --filter location==sy3 --filter critical==true
+```
+
+### Device Type Filtering
+Example: Run checks only on routers:
+
+```bash
+python manage_hosts.py --filter "type==router"
+```
+
+Power devices:
+
+```bash
+python manage_hosts.py --filter "type in pdu"  # Substring match: pdu in 'pdu'
+```
+
+### Combined Examples
+1. Filtering by numeric floor and location:
+
+```bash
+python manage_hosts.py \
+    --filter floor>=5 \
+    --filter location==dc3 \
+    --shutdown
+```
+
+2. Filtering out a certain substring:
+
+```bash
+python manage_hosts.py \
+    --filter "rack not in out-of-service" \
+    --reboot
+```
+
+3. Using multiple comparators on a single run:
+
+```bash
+python manage_hosts.py \
+    --filter "type!=router" \
+    --filter "critical is true" \
+    --filter "floor <= 10" \
+    --command "echo 'Performing a check on this endpoint'"
+```
+
+### Run From a Remote Host (Pipe Method)
+You can fetch the script directly from GitHub and run it via a pipe:
+
+```bash
+curl -sSL \
+  https://raw.githubusercontent.com/aperim/manage-hosts/refs/heads/main/src/manage_hosts.py \
+  | python3 - --help
+```
+
+Another example:  
+```bash
+curl -sSL \
+  https://raw.githubusercontent.com/aperim/manage-hosts/refs/heads/main/src/manage_hosts.py \
+  | python3 - --filter "type==router" --command "echo 'Hello Router!'"
+```
+
+Or to shut down only storage devices explicitly included:
+
+```bash
+curl -sSL \
+  https://raw.githubusercontent.com/aperim/manage-hosts/refs/heads/main/src/manage_hosts.py \
+  | python3 - --shutdown --include-storage
+```
+
+---
+
+## Configuration File (YAML) Example
+
+Below is a short example of a YAML configuration (commonly named “hosts.yaml”). By default, the script looks for this file locally or you can specify `--config`:
 
 ```yaml
-# SSH Keys
 keys:
   my_key_1: |
     -----BEGIN OPENSSH PRIVATE KEY-----
@@ -67,9 +245,8 @@ keys:
   my_key_2:
     file: "/home/user/.ssh/id_rsa"
   my_key_3:
-    env: "MY_BASE64_ENCODED_KEY"
+    env: "MY_BASE64_KEY"
 
-# Defined Endpoints
 endpoints:
   - fqdn: server1.local
     type: host
@@ -100,55 +277,61 @@ endpoints:
     credentials:
       - username: admin
         key: my_key_1
-    host_dependencies: []
-    ups_dependencies: []
-    pdu_dependencies: []
-    overrides:
-      # Uses default shutdown and reboot commands
+    overrides: {}
 
   - fqdn: ups1.local
     type: ups
     tags:
       location: sy3
     credentials: []
-    host_dependencies: []
-    ups_dependencies: []
-    pdu_dependencies: []
-    # No overrides, so any shutdown command is a no-op if credentials are missing
+    overrides: {}
 ```
 
---------------------------------------------------------------------------------
-## Usage Examples
+---
 
-• Default operation (ping + SSH check):  
-  python manage_hosts.py
+## Advanced Usage & Environment Variables
 
-• Override config path (local file) and test run:  
-  python manage_hosts.py --config /etc/hostmanage/hosts.yaml --test
+1. **Environment Variables**  
+   • MANAGE_HOSTS_CONFIG : Path or HTTPS URL to config file.  
+   • MANAGE_HOSTS_THREADS : Override default thread count.  
+   • MANAGE_HOSTS_FILTER : YAML list of filters, e.g. ["floor>=5","type==router"].  
+   • MANAGE_HOSTS_TEST : If “true” or “1”, runs in dry-run mode, echoing destructive commands.  
+   • MANAGE_HOSTS_TIMEOUT : Timeout for commands (seconds).  
+   • MANAGE_HOSTS_INCLUDE_NETWORK : If “true”, includes router, switch, firewall.  
+   • MANAGE_HOSTS_INCLUDE_STORAGE : If “true”, includes storage devices.  
+   • MANAGE_HOSTS_INCLUDE_POWER : If “true”, includes UPS and PDU devices.
 
-• Filtering and threads:  
-  python manage_hosts.py --filter location=sy3 --filter critical=true --threads 5
+2. **Overriding Commands**  
+   For each endpoint, you can set “shutdown” or “reboot” in “overrides” to replace the default `sudo shutdown -h now` or `sudo shutdown -r now`.
 
-• Filter by device type:  
-  python manage_hosts.py --filter "type==router"
+3. **Threading**  
+   By default, we use up to (CPU count - 1) threads. You can reduce or increase concurrency with `--threads`.
 
-• Executing a command on all endpoints (deepest dependencies first):  
-  python manage_hosts.py --command "sudo apt-get update && sudo apt-get -y full-upgrade"
+4. **Dry Run Mode**  
+   Provide `--test` or set `MANAGE_HOSTS_TEST=true` to simulate commands without performing them.
 
-• Shutting down all hosts (deepest dependencies first):  
-  python manage_hosts.py --shutdown
+---
 
-• Rebooting all hosts:  
-  python manage_hosts.py --reboot
+## License
 
-• Generating JSON output:  
-  python manage_hosts.py --filter critical=true --json
+Copyright © 2025  
+Aperim Pty Ltd  
 
---------------------------------------------------------------------------------
-## Notes
+Licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). You may not use this file except in compliance with the License.
 
-• This script assumes the required libraries (paramiko, PyYAML, requests) are installed.  
-• In --test mode, no destructive commands (shutdown/reboot) are actually executed.  
-• Timeout for remote operations defaults to 300 seconds; can be overridden by --timeout or MANAGE_HOSTS_TIMEOUT.  
-• Dependency ordering ensures child endpoints are addressed first.  
-• The script is idempotent regarding local file changes.  
+---
+
+## Contact & Contributing
+
+• Author: Troy Kelly (Aperim Pty Ltd)  
+• Repository: <https://github.com/aperim/manage-hosts>  
+
+Issues, feature requests, and pull requests are welcome. Feel free to open a discussion or contact the author for questions.  
+
+To contribute:
+
+1. Fork the project.  
+2. Create a new branch (git checkout -b feature/myfeature).  
+3. Commit your changes (git commit -am 'Add new feature').  
+4. Push your branch (git push origin feature/myfeature).  
+5. Create a Pull Request.
