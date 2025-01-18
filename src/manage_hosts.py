@@ -5,10 +5,7 @@ manage_hosts.py
 
 A robust Python script to manage a list of hosts, PDUs, UPS devices, routers, switches, etc.
 Reads configuration from a YAML file or HTTPS URL, applying filters and optionally performing
-command execution or shutdown operations with concurrency and dependency ordering.
-
-This script follows the Google Python Style Guide, with type annotations and docstrings for
-all major functions and classes.
+command execution, shutdown, or reboot in concurrency with dependency ordering.
 
 Requires:
     Python 3.9+
@@ -64,7 +61,7 @@ VALID_ENDPOINT_TYPES = {
     "host", "ups", "pdu", "router", "switch", "firewall", "storage"
 }
 
-# You can adjust these ANSI escapes or remove them if you do not want coloured output.
+# You can adjust or remove these ANSI escapes if you prefer uncoloured output
 GREEN = "\033[92m"
 RED = "\033[91m"
 YELLOW = "\033[93m"
@@ -91,9 +88,9 @@ class KeyDefinition:
         Initializes a KeyDefinition.
 
         Args:
-            key_data: If provided, a direct string containing the key.
-            file_path: If provided, the path to a file containing the key.
-            env_var: If provided, an environment variable containing base64-encoded key.
+            key_data: Direct string containing the key.
+            file_path: Path to a file containing the key.
+            env_var: Environment variable containing a base64-encoded key.
         """
         self.key_data = key_data
         self.file_path = file_path
@@ -101,7 +98,7 @@ class KeyDefinition:
 
 
 class Endpoint:
-    """Represents a single endpoint (e.g. host, ups, router, switch) with dependencies."""
+    """Represents a single endpoint (host, ups, pdu, router, switch, etc.) with dependencies."""
 
     def __init__(
         self,
@@ -112,18 +109,20 @@ class Endpoint:
         host_dependencies: List[str],
         ups_dependencies: List[Dict[str, str]],
         pdu_dependencies: List[Dict[str, str]],
+        overrides: Dict[str, str]
     ) -> None:
         """
         Initializes an Endpoint instance.
 
         Args:
             fqdn: Fully Qualified Domain Name of the endpoint.
-            dev_type: Type of device (e.g. 'host', 'ups', 'pdu', 'router', etc.)
-            tags: Key-value tags that describe this endpoint (e.g. location, critical).
-            credentials: List of dicts like [{'username': user, 'key': keyref}, ...].
-            host_dependencies: List of host FQDNs that this endpoint depends on.
-            ups_dependencies: List of dicts representing UPS dependencies.
-            pdu_dependencies: List of dicts representing PDU dependencies.
+            dev_type: Type of device, e.g. 'host', 'ups', 'pdu', 'router'.
+            tags: Key-value tags that describe this endpoint (e.g. location=sy3).
+            credentials: List of dicts like [{"username": "...", "key": "..."}, ...].
+            host_dependencies: List of FQDN strings that must be "up" first.
+            ups_dependencies: List of dicts describing UPS dependencies.
+            pdu_dependencies: List of dicts describing PDU dependencies.
+            overrides: Dict of optional command overrides, e.g. {"shutdown":"...", "reboot":"..."}.
         """
         self.fqdn = fqdn
         self.dev_type = dev_type
@@ -132,11 +131,12 @@ class Endpoint:
         self.host_dependencies = host_dependencies
         self.ups_dependencies = ups_dependencies
         self.pdu_dependencies = pdu_dependencies
-        self.depth = 0  # Will be set later by calculate_depths()
+        self.overrides = overrides
+        self.depth = 0  # to be set by calculate_depths()
 
 
 def load_yaml_config(config_source: str) -> Dict[str, object]:
-    """Loads and parses the YAML configuration, from a file path or an HTTPS URL.
+    """Loads and parses the YAML configuration from a file path or an HTTPS URL.
 
     Args:
         config_source: A local filesystem path or an HTTPS URL.
@@ -151,12 +151,10 @@ def load_yaml_config(config_source: str) -> Dict[str, object]:
     if config_source.startswith("http://"):
         raise ValueError("Configuration via HTTP (non-SSL) is not permitted.")
     if config_source.startswith("https://"):
-        # Retrieve via HTTPS
         resp = requests.get(config_source, timeout=10)
         resp.raise_for_status()
         return yaml.safe_load(resp.text)
     else:
-        # Local file
         expanded_path = os.path.expanduser(config_source)
         if not os.path.isfile(expanded_path):
             raise OSError(f"Cannot open configuration file: {expanded_path}")
@@ -171,7 +169,7 @@ def parse_keys(key_section: Dict[str, object]) -> Dict[str, KeyDefinition]:
         key_section: Dict of key_name -> (string or file/env reference).
 
     Returns:
-        A dictionary of key_name -> KeyDefinition objects.
+        A dictionary of key_name -> KeyDefinition.
     """
     results = {}
     for key_name, value in key_section.items():
@@ -179,7 +177,6 @@ def parse_keys(key_section: Dict[str, object]) -> Dict[str, KeyDefinition]:
             # Inline key
             results[key_name] = KeyDefinition(key_data=value)
         elif isinstance(value, dict):
-            # Could be 'file' or 'env' or 'inline'
             file_path = value.get("file")
             env_var = value.get("env")
             inline = value.get("inline")
@@ -194,30 +191,30 @@ def parse_keys(key_section: Dict[str, object]) -> Dict[str, KeyDefinition]:
 
 
 def resolve_key(key_def: KeyDefinition) -> str:
-    """Resolves an actual private key string from a KeyDefinition.
+    """Resolves a private key string from a KeyDefinition.
 
     Args:
-        key_def: The KeyDefinition object to resolve.
+        key_def: The KeyDefinition object.
 
     Returns:
-        The private key as a string.
+        The private key text.
 
     Raises:
         OSError: If a file path cannot be opened.
-        ValueError: If the environment variable is not set or is empty.
+        ValueError: If environment variable is not set or empty.
     """
-    if key_def.file_path is not None:
+    if key_def.file_path:
         expanded_path = os.path.expanduser(key_def.file_path)
         with open(expanded_path, "r", encoding="utf-8") as file_handle:
             return file_handle.read()
-    if key_def.env_var is not None:
+    if key_def.env_var:
         env_val = os.environ.get(key_def.env_var)
         if not env_val:
             raise ValueError(
                 f"Environment variable '{key_def.env_var}' not found or empty."
             )
         return base64.b64decode(env_val).decode("utf-8")
-    if key_def.key_data is not None:
+    if key_def.key_data:
         return key_def.key_data
     raise ValueError("No valid key data found in KeyDefinition.")
 
@@ -245,19 +242,30 @@ def build_endpoints(
         host_deps = item.get("host_dependencies", [])
         ups_deps = item.get("ups_dependencies", [])
         pdu_deps = item.get("pdu_dependencies", [])
+        overrides = item.get("overrides", {})
 
         if dev_type not in VALID_ENDPOINT_TYPES:
-            raise ValueError(f"Unsupported endpoint type '{dev_type}' for {fqdn}.")
+            raise ValueError(f"Unsupported endpoint type '{
+                             dev_type}' for {fqdn}.")
+
+        # Ensure we only store dict overrides
+        if not isinstance(overrides, dict):
+            overrides = {}
 
         endpoints.append(
             Endpoint(
                 fqdn=fqdn,
                 dev_type=dev_type,
                 tags=tags if isinstance(tags, dict) else {},
-                credentials=credentials if isinstance(credentials, list) else [],
-                host_dependencies=host_deps if isinstance(host_deps, list) else [],
-                ups_dependencies=ups_deps if isinstance(ups_deps, list) else [],
-                pdu_dependencies=pdu_deps if isinstance(pdu_deps, list) else [],
+                credentials=credentials if isinstance(
+                    credentials, list) else [],
+                host_dependencies=host_deps if isinstance(
+                    host_deps, list) else [],
+                ups_dependencies=ups_deps if isinstance(
+                    ups_deps, list) else [],
+                pdu_dependencies=pdu_deps if isinstance(
+                    pdu_deps, list) else [],
+                overrides=overrides,
             )
         )
     return endpoints
@@ -266,9 +274,8 @@ def build_endpoints(
 def calculate_depths(endpoints: List[Endpoint]) -> None:
     """Assigns a 'depth' value to each Endpoint based on dependencies.
 
-    The 'depth' is defined as the maximum distance from the endpoint to any
-    ancestor with no dependencies. Higher depth means more "child" or "leaf"
-    in the dependency tree.
+    Depth is the maximum distance from the endpoint to an ancestor with zero dependencies.
+    Higher depth implies a more "leaf-like" node in the dependency tree.
 
     Args:
         endpoints: A list of Endpoint objects to process.
@@ -276,16 +283,35 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
     endpoint_map = {e.fqdn: e for e in endpoints}
 
     def get_dependencies(e: Endpoint) -> List[str]:
+        """Builds a combined list of dependency FQDNs for the endpoint.
+
+        This function handles both dict-based dependencies (e.g. {"name": "ups1.local"})
+        and string-based dependencies (e.g. "ups1.local").
+        """
         result: List[str] = []
+        # Host dependencies are assumed to be strings (FQDNs).
         result.extend(e.host_dependencies)
+
+        # For ups_dependencies, each entry might be a dict or a plain string.
         for ud in e.ups_dependencies:
-            name = ud.get("name")
-            if name:
-                result.append(str(name))
+            if isinstance(ud, dict):
+                name = ud.get("name")
+                if name:
+                    result.append(str(name))
+            elif isinstance(ud, str):
+                # handle plain string
+                result.append(ud)
+
+        # PDU dependencies likewise might be dicts or strings.
         for pd in e.pdu_dependencies:
-            name = pd.get("name")
-            if name:
-                result.append(str(name))
+            if isinstance(pd, dict):
+                name = pd.get("name")
+                if name:
+                    result.append(str(name))
+            elif isinstance(pd, str):
+                # handle plain string
+                result.append(pd)
+
         return result
 
     visited: Dict[str, int] = {}
@@ -294,12 +320,13 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
         if stack is None:
             stack = set()
         if fqdn in stack:
-            # cycle detection
+            # cycle detected
             return 0
         stack.add(fqdn)
         if fqdn in visited:
             stack.remove(fqdn)
             return visited[fqdn]
+
         endpoint = endpoint_map[fqdn]
         deps = [d for d in get_dependencies(endpoint) if d in endpoint_map]
         if not deps:
@@ -314,32 +341,22 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
 
 
 def parse_filters(filter_list: List[str]) -> List[Tuple[str, str, str]]:
-    """Parses a list of filter specifications into structured tuples.
-
-    Each filter can be in the form:
-        key=value
-        key>=value
-        key<=value
-        key>value
-        key<value
+    """Parses filter strings (e.g. 'location=sy3', 'floor>=5') into structured tuples.
 
     Args:
-        filter_list: List of filter strings from the command line
-                     (e.g. ['location=sy3', 'floor>=5']).
+        filter_list: List of filter strings from the command line or environment.
 
     Returns:
         A list of tuples (tag_key, operator, test_value).
     """
     result: List[Tuple[str, str, str]] = []
     pattern = re.compile(r"^([^=<>]+)([=<>]+)(.+)$")
+
     for flt in filter_list:
         match = pattern.match(flt)
         if match:
             key, op, val = match.groups()
-            key = key.strip()
-            op = op.strip()
-            val = val.strip()
-            result.append((key, op, val))
+            result.append((key.strip(), op.strip(), val.strip()))
         else:
             # If no operator is found, assume '='
             parts = flt.split("=", maxsplit=1)
@@ -352,14 +369,14 @@ def parse_filters(filter_list: List[str]) -> List[Tuple[str, str, str]]:
 
 
 def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) -> bool:
-    """Determines if an Endpoint satisfies all filter criteria.
+    """Checks if an endpoint satisfies all filter criteria.
 
     Args:
-        ep: The Endpoint in question.
-        filters: A list of (tag_key, operator, value).
+        ep: The endpoint to test.
+        filters: A list of (tag_key, operator, test_value).
 
     Returns:
-        True if the endpoint satisfies all filters, otherwise False.
+        True if the endpoint matches all filters, else False.
     """
     for (fkey, fop, fval) in filters:
         if fkey not in ep.tags:
@@ -369,7 +386,7 @@ def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) 
             val_float = float(val_str)
             fval_float = float(fval)
         except ValueError:
-            # Not numeric => do string comparisons
+            # String comparison instead
             val_float = None
             fval_float = None
 
@@ -377,45 +394,43 @@ def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) 
             # Numeric comparison
             if fop == "=" and not (val_float == fval_float):
                 return False
-            if fop == ">" and not (val_float > fval_float):
+            elif fop == ">" and not (val_float > fval_float):
                 return False
-            if fop == "<" and not (val_float < fval_float):
+            elif fop == "<" and not (val_float < fval_float):
                 return False
-            if fop == ">=" and not (val_float >= fval_float):
+            elif fop == ">=" and not (val_float >= fval_float):
                 return False
-            if fop == "<=" and not (val_float <= fval_float):
+            elif fop == "<=" and not (val_float <= fval_float):
                 return False
         else:
-            # String-based comparison
+            # String-based
             if fop == "=" and val_str != fval:
                 return False
             if fop in [">", "<", ">=", "<="]:
-                # If filter suggests numeric but we have strings, fail
                 return False
     return True
 
 
 def ping_endpoint(host: str, timeout: int = 1) -> Optional[float]:
-    """Pings an endpoint once and returns the round-trip time (RTT) if successful.
+    """Pings an endpoint once and returns round-trip time (RTT) in ms if successful.
 
     Args:
-        host: The hostname or IP to ping.
+        host: Hostname or IP to ping.
         timeout: Timeout in seconds for the ping.
 
     Returns:
-        RTT in milliseconds if the ping succeeds, None otherwise.
+        RTT as a float, or None if unreachable.
     """
     system = platform.system().lower()
     if system == "darwin":
         cmd = ["ping", "-c", "1", "-t", str(timeout), host]
     else:
-        # Assume Linux or other
         cmd = ["ping", "-c", "1", "-W", str(timeout), host]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False)
         if result.returncode == 0:
-            # Attempt to parse RTT from output, e.g. "time=0.123 ms"
             match = re.search(r"time[=<]\s?([\d\.]+)\s?ms", result.stdout)
             if match:
                 return float(match.group(1))
@@ -433,22 +448,22 @@ def attempt_ssh_command(
     test_run: bool,
     timeout: int = 300
 ) -> Tuple[bool, str]:
-    """Attempts to run an SSH command on the host with multiple possible credentials.
+    """Attempts to run an SSH command using multiple credentials in order.
 
     Args:
         host: The hostname to SSH into.
-        credentials: A list of {username, key}, in order.
-        keys_map: A dictionary of key_name -> KeyDefinition for resolving private keys.
-        command: The command to execute.
-        test_run: If True, the command is replaced with an "echo" statement.
-        timeout: Timeout for command execution (seconds).
+        credentials: A list of {"username":"...", "key":"..."} items in priority order.
+        keys_map: A dictionary of key_name -> KeyDefinition.
+        command: The command to execute, or an "echo" statement if test_run is True.
+        test_run: If True, no real command is run, only a simulated echo.
+        timeout: Time in seconds to allow the command to run.
 
     Returns:
-        (success, output) tuple, indicating whether authentication ever succeeded
-        and the last operation output or error messages.
+        (success, output) => success is True if at least one SSH credential worked.
+                             output is the combined stdout/stderr of the last attempt.
     """
     if test_run:
-        return True, f"(Test-run) Would execute [{command}] for {host}"
+        return True, f"(Test-run) Would execute [{command}] on {host}"
 
     saved_output = ""
     for cred in credentials:
@@ -457,18 +472,18 @@ def attempt_ssh_command(
 
         if keyname not in keys_map:
             saved_output += (
-                f"\nNo matching key '{keyname}' found for {host}. "
-                "Skipping this credential."
+                f"\nNo matching key '{keyname}' found for {
+                    host}. Skipping this credential."
             )
             continue
 
         try:
             key_data = resolve_key(keys_map[keyname])
         except Exception as ex:
-            saved_output += f"\nFailed to resolve key {keyname} for {host}: {ex}"
+            saved_output += f"\nFailed to resolve key {
+                keyname} for {host}: {ex}"
             continue
 
-        # Write the key to a temp file for Paramiko
         tmpk_name = None
         try:
             with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpk:
@@ -476,7 +491,6 @@ def attempt_ssh_command(
                 tmpk.flush()
                 tmpk_name = tmpk.name
 
-            # Attempt reading the private key with multiple known types
             pkey_obj = None
             for pk_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
                 try:
@@ -486,16 +500,15 @@ def attempt_ssh_command(
                     continue
                 except Exception as ex_inner:
                     saved_output += (
-                        f"\nUnable to parse with {pk_class.__name__} for {host}: {ex_inner}"
+                        f"\nError parsing key with {
+                            pk_class.__name__} for {host}: {ex_inner}"
                     )
 
             if pkey_obj is None:
-                saved_output += (
-                    f"\nAll key parsers failed for {host}. Possibly unsupported key format."
-                )
+                saved_output += f"\nAll key parsers failed for {
+                    host}. Possibly unsupported key format."
                 continue
 
-            # Now try connecting
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
@@ -508,11 +521,13 @@ def attempt_ssh_command(
                     allow_agent=False
                 )
             except paramiko.AuthenticationException as auth_ex:
-                saved_output += f"\nSSH to {host} with user {user} failed: {auth_ex}"
+                saved_output += f"\nSSH to {
+                    host} [user={user}] failed: {auth_ex}"
                 ssh.close()
                 continue
             except Exception as ex_conn:
-                saved_output += f"\nSSH to {host} with user {user} errored: {ex_conn}"
+                saved_output += f"\nSSH to {
+                    host} [user={user}] error: {ex_conn}"
                 ssh.close()
                 continue
 
@@ -529,14 +544,14 @@ def attempt_ssh_command(
                         data = chan.recv(4096).decode("utf-8", errors="ignore")
                         output_buffer.append(data)
                     if chan.recv_stderr_ready():
-                        data = chan.recv_stderr(4096).decode("utf-8", errors="ignore")
+                        data = chan.recv_stderr(4096).decode(
+                            "utf-8", errors="ignore")
                         output_buffer.append(data)
                     if chan.exit_status_ready():
                         break
                     if (time.time() - start_time) > timeout:
                         output_buffer.append(
-                            f"(Timed out after {timeout} seconds)\n"
-                        )
+                            f"(Timed out after {timeout} seconds)\n")
                         break
                     time.sleep(0.1)
 
@@ -547,29 +562,32 @@ def attempt_ssh_command(
                 if exit_code == 0:
                     return True, saved_output
                 else:
-                    # Even if the command fails, we consider authentication a success.
-                    saved_output += f"\nCommand on {host} [user={user}] exit code={exit_code}."
+                    # Authentication was successful, but command non-zero exit code
+                    saved_output += (
+                        f"\nCommand on {host} [user={
+                            user}] exit code={exit_code}."
+                    )
                     return True, saved_output
             except Exception as ex_run:
-                saved_output += f"\nError executing command on {host}: {ex_run}"
+                saved_output += f"\nError executing command on {
+                    host}: {ex_run}"
                 ssh.close()
         finally:
             if tmpk_name and os.path.exists(tmpk_name):
                 os.remove(tmpk_name)
 
-    # If we tried all credentials without returning success:
     return False, saved_output
 
 
 def wait_until_unpingable(host: str, timeout: int = 300) -> bool:
-    """Waits until the host becomes unpingable or until the timeout elapses.
+    """Waits until the host is unreachable by ping or until the timeout elapses.
 
     Args:
-        host: The host to test.
-        timeout: Maximum number of seconds to wait.
+        host: The host to check.
+        timeout: How many seconds to wait.
 
     Returns:
-        True if the host became unreachable, else False.
+        True if the host became unreachable, otherwise False.
     """
     start = time.time()
     while time.time() - start < timeout:
@@ -585,38 +603,41 @@ def manage_endpoints(
     filters: List[Tuple[str, str, str]],
     cmd: Optional[str],
     do_shutdown: bool,
+    do_reboot: bool,
     test_run: bool,
     output_format: str,
     timeout_sec: int,
     threads: int,
 ) -> Union[str, Dict[str, Dict[str, object]]]:
-    """Coordinates the endpoint management operations (check, command, shutdown) in waves.
+    """Manages endpoints by performing checks, commands, shutdown, or reboot in wave order.
 
     Args:
         endpoints: The list of Endpoint objects.
-        keys_map: Resolved dictionary of SSH key definitions.
-        filters: A list of parsed filter tuples (tag, operator, value).
-        cmd: The command to execute, if any (otherwise None).
-        do_shutdown: If True, we are performing a shutdown operation.
-        test_run: If True, command actions become echo statements only.
-        output_format: "text", "json", or "yaml".
-        timeout_sec: Timeout in seconds for remote operations.
-        threads: Number of worker threads.
+        keys_map: Dictionary of key_name -> KeyDefinition.
+        filters: A list of filter tuples (tag_key, operator, test_value).
+        cmd: A custom command to run (if any).
+        do_shutdown: If True, initiate a shutdown wave in deepest-to-shallowest order.
+        do_reboot: If True, initiate a reboot wave in deepest-to-shallowest order.
+        test_run: If True, replaces destructive commands with "echo" statements.
+        output_format: One of "text", "json", or "yaml".
+        timeout_sec: Time in seconds to allow each operation to complete.
+        threads: Number of worker threads to use.
 
     Returns:
-        A string of formatted output (for "text"/"json"/"yaml"), or
-        a dict of endpoint results if further processing is desired.
+        A string representation of the operation results (text, json, yaml)
+        or a dictionary if further processing is needed.
     """
     # Filter endpoints
-    filtered = [ep for ep in endpoints if endpoint_matches_filters(ep, filters)]
+    filtered = [
+        ep for ep in endpoints if endpoint_matches_filters(ep, filters)]
 
-    # Sort endpoints by depth descending so the deepest endpoints are processed first
+    # Sort endpoints by depth descending (deepest first)
     filtered.sort(key=lambda e: e.depth, reverse=True)
 
     results: Dict[str, Dict[str, object]] = {}
 
     def worker(e: Endpoint) -> None:
-        """Worker function for an endpoint in a single wave."""
+        """Processes a single endpoint in the wave."""
         res: Dict[str, object] = {
             "fqdn": e.fqdn,
             "type": e.dev_type,
@@ -628,12 +649,12 @@ def manage_endpoints(
             "operation_success": False,
         }
 
-        # 1) Ping check
+        # Ping
         rtt = ping_endpoint(e.fqdn, timeout=1)
         if rtt is not None:
             res["ping_rtt_ms"] = rtt
 
-        # 2) If credentials exist, do a basic SSH check
+        # SSH check if credentials
         if e.credentials:
             ssh_success, ssh_output = attempt_ssh_command(
                 host=e.fqdn,
@@ -641,16 +662,16 @@ def manage_endpoints(
                 keys_map=keys_map,
                 command="echo 'SSH Test Connection'",
                 test_run=test_run,
-                timeout=5,
+                timeout=5
             )
             res["ssh_check"] = ssh_success
             if ssh_output:
-                # Keep the entire output but store in 'ssh_version' as well
+                # Store entire result in 'ssh_version' for visibility
                 res["ssh_version"] = ssh_output.replace("\n", " ")
 
-        # 3) Actual operation
+        # Operation
         if cmd is not None:
-            # Execute user-supplied command
+            # Custom user command
             success, out = attempt_ssh_command(
                 host=e.fqdn,
                 credentials=e.credentials,
@@ -663,28 +684,63 @@ def manage_endpoints(
             res["operation_output"] = out
 
         elif do_shutdown:
-            # Attempt to shut down
-            shutdown_cmd = "echo 'I would shutdown now'" if test_run else "sudo shutdown -h now"
+            # Shut down using override or default
+            default_shutdown_cmd = "sudo shutdown -h now"
+            shutdown_cmd = (
+                e.overrides.get("shutdown", default_shutdown_cmd)
+                if not test_run
+                else "echo 'I would shutdown now'"
+            )
             success, out = attempt_ssh_command(
                 host=e.fqdn,
                 credentials=e.credentials,
                 keys_map=keys_map,
                 command=shutdown_cmd,
-                test_run=False,
+                test_run=False,  # We handle "echo" for test_run
                 timeout=15
             )
             res["operation_output"] = out
             res["operation_success"] = success
+
             if success and not test_run:
-                # Wait until unpingable
+                # Wait until unreachable
                 offline = wait_until_unpingable(e.fqdn, timeout_sec)
                 if not offline:
-                    res["operation_output"] += f"\nHost still pingable after {timeout_sec}s."
+                    res["operation_output"] += f"\nHost still pingable after {
+                        timeout_sec}s."
+                    res["operation_success"] = False
+
+        elif do_reboot:
+            # Reboot using override or default
+            default_reboot_cmd = "sudo shutdown -r now"
+            reboot_cmd = (
+                e.overrides.get("reboot", default_reboot_cmd)
+                if not test_run
+                else "echo 'I would reboot now'"
+            )
+            success, out = attempt_ssh_command(
+                host=e.fqdn,
+                credentials=e.credentials,
+                keys_map=keys_map,
+                command=reboot_cmd,
+                test_run=False,  # We handle "echo" for test_run
+                timeout=15
+            )
+            res["operation_output"] = out
+            res["operation_success"] = success
+
+            # For reboot, we also wait until unreachable (mirroring shutdown).
+            # This does NOT attempt to see if it comes back up.
+            if success and not test_run:
+                offline = wait_until_unpingable(e.fqdn, timeout_sec)
+                if not offline:
+                    res["operation_output"] += f"\nHost still pingable after {
+                        timeout_sec}s."
                     res["operation_success"] = False
 
         results[e.fqdn] = res
 
-    # Process endpoints in waves for each distinct depth
+    # Process endpoints in waves grouped by depth
     distinct_depths = sorted(set(ep.depth for ep in filtered), reverse=True)
     for depth_lvl in distinct_depths:
         wave_endpoints = [ep for ep in filtered if ep.depth == depth_lvl]
@@ -692,7 +748,7 @@ def manage_endpoints(
             futures = [executor.submit(worker, wep) for wep in wave_endpoints]
             concurrent.futures.wait(futures)
 
-    # Format or return
+    # Format output
     if output_format == "json":
         try:
             import json
@@ -706,49 +762,38 @@ def manage_endpoints(
         except ImportError:
             return str(results)
     else:
-        # Build a plain text table
+        # Plain-text
         return build_text_report(results)
 
 
 def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
-    """Builds a human-friendly text table from the results dictionary.
+    """Constructs a human-friendly text table from the results.
 
     Args:
-        results: A dictionary of fqdn -> result data.
+        results: A dict of fqdn -> result data.
 
     Returns:
-        A string containing a tabular representation of the results.
+        A multi-line string with columns aligned.
     """
     rows = list(results.values())
-    # Sort by FQDN alphabetically for stable output
     rows.sort(key=lambda x: str(x["fqdn"]))
 
-    # Determine max column widths for alignment
-    max_fqdn_len = max((len(str(r["fqdn"])) for r in rows), default=4)
-    max_type_len = max((len(str(r["type"])) for r in rows), default=4)
-
-    # Ensure some minimum widths
+    # Determine column widths
+    max_fqdn_len = max((len(str(r["fqdn"])) for r in rows), default=20)
     max_fqdn_len = max(max_fqdn_len, 20)
+    max_type_len = max((len(str(r["type"])) for r in rows), default=8)
     max_type_len = max(max_type_len, 8)
 
     header_fmt = (
-        f"{BLUE}{{:<{max_fqdn_len}}} "
-        f"{{:<{max_type_len}}} "
-        f"{{:>5}} "    # depth
-        f"{{:>8}} "    # ping
-        f"{{:>4}} "    # ssh
-        f"{{:>9}}{RESET}"  # operation
+        f"{BLUE}{{:<{max_fqdn_len}}} {{:<{
+            max_type_len}}} {{:>5}} {{:>8}} {{:>4}} {{:>9}}{RESET}"
     )
     line_fmt = (
-        f"{{:<{max_fqdn_len}}} "
-        f"{{:<{max_type_len}}} "
-        f"{{:>5}} "
-        f"{{:>8}} "
-        f"{{:>4}} "
-        f"{{:>9}}"
+        f"{{:<{max_fqdn_len}}} {{:<{max_type_len}}} {{:>5}} {{:>8}} {{:>4}} {{:>9}}"
     )
 
-    header = header_fmt.format("FQDN", "TYPE", "DEPTH", "PING(ms)", "SSH", "OPERATION")
+    header = header_fmt.format(
+        "FQDN", "TYPE", "DEPTH", "PING(ms)", "SSH", "OPERATION")
     lines = [header]
 
     for r in rows:
@@ -757,15 +802,11 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
         depth = str(r["depth"])
         ping_ms = r["ping_rtt_ms"]
         ssh_ok = r["ssh_check"]
-        op_success = r["operation_success"]
+        op_ok = r["operation_success"]
 
-        if ping_ms is None:
-            ping_str = "N/A"
-        else:
-            ping_str = f"{ping_ms:.2f}"
-
+        ping_str = f"{ping_ms:.2f}" if ping_ms else "N/A"
         ssh_str = f"{GREEN}OK{RESET}" if ssh_ok else f"{RED}NO{RESET}"
-        op_str = f"{GREEN}✓{RESET}" if op_success else f"{RED}✗{RESET}"
+        op_str = f"{GREEN}✓{RESET}" if op_ok else f"{RED}✗{RESET}"
 
         row_line = line_fmt.format(
             fqdn,
@@ -783,7 +824,7 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
 def main() -> None:
     """Main entry point of the manage_hosts script."""
     parser = argparse.ArgumentParser(
-        description="Manage Hosts Script - for controlling a variety of endpoints."
+        description="Manage Hosts Script - controlling endpoints (host, ups, pdu, router...)"
     )
     parser.add_argument(
         "--config", "-c",
@@ -803,11 +844,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--test", action="store_true",
-        help="Test mode. Instead of real actions, uses echo or no-op commands."
+        help="Test mode. Replaces actual commands with echo/no-op statements."
     )
     parser.add_argument(
         "--shutdown", action="store_true",
         help="Shut down all filtered endpoints in dependency order."
+    )
+    parser.add_argument(
+        "--reboot", action="store_true",
+        help="Reboot all filtered endpoints in dependency order."
     )
     parser.add_argument(
         "--command", "-x",
@@ -829,8 +874,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # If both shutdown and reboot are specified, error out
+    if args.shutdown and args.reboot:
+        parser.error(
+            "Cannot specify both --shutdown and --reboot at the same time.")
+
     # Determine config source
-    config_source = args.config or os.environ.get(ENV_CONFIG, DEFAULT_CONFIG_FILE)
+    config_source = args.config or os.environ.get(
+        ENV_CONFIG, DEFAULT_CONFIG_FILE)
 
     # Load YAML config
     try:
@@ -858,8 +909,8 @@ def main() -> None:
     # Calculate dependency depths
     calculate_depths(endpoints)
 
-    # Gather filters from command line plus environment
-    combined_filters = list(args.filter)
+    # Merge filters from command line + environment
+    combined_filters: List[str] = list(args.filter)
     env_filter_str = os.environ.get(ENV_FILTER)
     if env_filter_str:
         try:
@@ -876,7 +927,8 @@ def main() -> None:
     import multiprocessing
     cpus = multiprocessing.cpu_count()
     default_threads = max(cpus - 1, 1)
-    chosen_threads = args.threads or int(os.environ.get(ENV_THREADS, default_threads))
+    chosen_threads = args.threads or int(
+        os.environ.get(ENV_THREADS, default_threads))
 
     # Determine test mode
     test_run = args.test or (
@@ -886,7 +938,7 @@ def main() -> None:
     # Determine timeouts
     timeout_sec = args.timeout or int(os.environ.get(ENV_TIMEOUT, "300"))
 
-    # Determine output format
+    # Output format
     if args.json:
         output_format = "json"
     elif args.yaml:
@@ -894,23 +946,25 @@ def main() -> None:
     else:
         output_format = "text"
 
-    do_shutdown = args.shutdown
     user_cmd = args.command
+    do_shutdown = args.shutdown
+    do_reboot = args.reboot
 
-    # If no main operation was passed, we do a "check" (ping + SSH test).
+    # If no specific operation is passed, we do a normal check
+    # (ping + basic SSH test).
     results = manage_endpoints(
         endpoints=endpoints,
         keys_map=keys_map,
         filters=parsed_filter_tuples,
         cmd=user_cmd,
         do_shutdown=do_shutdown,
+        do_reboot=do_reboot,
         test_run=test_run,
         output_format=output_format,
         timeout_sec=timeout_sec,
         threads=chosen_threads,
     )
 
-    # Print the final results
     print(results)
 
 
