@@ -3,20 +3,23 @@
 """
 manage_hosts.py
 
-A robust Python script to manage a list of hosts, PDUs, UPS devices, routers, switches, etc.
-It reads configuration from a YAML file or HTTPS URL, applying filters and optionally performing
-ping checks, SSH checks, commands, shutdown, or reboot in concurrency with dependency ordering.
+A robust Python script to manage a list of hosts, PDUs, UPS devices, routers,
+switches, etc. It reads configuration from a YAML file or HTTPS URL, applying
+filters and optionally performing ping checks, SSH checks, commands, shutdown,
+or reboot in concurrency with dependency ordering.
 
 Key Features:
     - YAML-based configuration, supporting local file or HTTPS URL.
-    - SSH private keys loaded from inline text, file paths, or environment variables (base64-encoded).
-    - Endpoints with typed dependencies (hosts, UPS, PDUs), processed in depth-based order.
+    - SSH private keys loaded from inline text, file paths, or environment
+      variables (base64-encoded).
+    - Endpoints with typed dependencies (hosts, UPS, PDUs), processed in
+      depth-based order.
     - Threaded operations and filtering by tags.
     - Colourised console output or JSON/YAML reports.
     - Per-endpoint overrides for the default shutdown or reboot commands.
 
-This script follows the Google Python Style Guide where possible and includes inline docstrings
-for maintainability.
+This script follows the Google Python Style Guide where possible and includes
+inline docstrings for maintainability.
 
 Requires:
     Python 3.9+
@@ -42,7 +45,6 @@ import concurrent.futures
 import re
 from typing import Dict, List, Optional, Union, Tuple
 
-# Attempt to import third-party libraries, exit if missing.
 try:
     import yaml
 except ImportError:
@@ -61,7 +63,6 @@ except ImportError:
     print("Please install paramiko (pip install paramiko).")
     sys.exit(1)
 
-# Constants for environment variables and defaults.
 PROGRAM_NAME = "manage_hosts"
 DEFAULT_CONFIG_FILE = "hosts.yaml"
 ENV_CONFIG = "MANAGE_HOSTS_CONFIG"
@@ -70,7 +71,6 @@ ENV_FILTER = "MANAGE_HOSTS_FILTER"
 ENV_TEST = "MANAGE_HOSTS_TEST"
 ENV_TIMEOUT = "MANAGE_HOSTS_TIMEOUT"
 
-# Valid endpoint types enumeration.
 VALID_ENDPOINT_TYPES = {
     "host", "ups", "pdu", "router", "switch", "firewall", "storage"
 }
@@ -431,45 +431,44 @@ def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) 
 def ping_endpoint(host: str, timeout: int = 1) -> Optional[float]:
     """Pings a given host once and attempts to parse the round-trip time in milliseconds.
 
+    IMPORTANT:
+        - We attempt to parse 'time=...', 'time<...', or 'rtt min/avg...' lines even if
+          the ping command returns a non-zero exit code. Some networks or containers
+          may partially respond but still produce a non-zero exit code.
+
     Args:
         host: The hostname or IP address to ping.
         timeout: Timeout in seconds for the ping.
 
     Returns:
-        A float representing the RTT in milliseconds if the ping succeeds,
-        or None if the host is unreachable or an error occurs.
+        A float representing the RTT in milliseconds if we can parse it from the output,
+        or None if no RTT is found or an error occurs.
     """
     system = platform.system().lower()
     if system == "darwin":
-        # On macOS, `-t` sets the hop limit; there's no direct -W on older versions.
         cmd = ["ping", "-c", "1", "-t", str(timeout), host]
     else:
-        # On Linux-like systems, `-W` sets the response timeout in seconds.
         cmd = ["ping", "-c", "1", "-W", str(timeout), host]
 
     try:
+        # We won't use check=True, so we can parse output even if returncode != 0
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=False)
-        if result.returncode == 0:
-            # 1) Parse direct single-response line: "time=1.23 ms" or "time<1 ms"
-            match = re.search(r"time[=<>]\s?([\d\.]+)\s?ms", result.stdout)
-            if match:
-                return float(match.group(1))
 
-            # 2) Optionally parse min/avg line, e.g. rtt min/avg/max = 0.042/0.042/0.092/...
-            rtt_match = re.search(
-                r"rtt min/avg/max/[^\s]+ = [\d\.]+/([\d\.]+)/[\d\.]+/[\d\.]+ ms",
-                result.stdout
-            )
-            if rtt_match:
-                return float(rtt_match.group(1))
+        # Attempt to parse a direct single-response line: "time=1.23 ms" or "time<1 ms"
+        match = re.search(r"time[=<>]\s?([\d\.]+)\s?ms", result.stdout)
+        if match:
+            return float(match.group(1))
 
-            # If ping is successful but we couldn't parse a time, return 0.0
-            return 0.0
+        # Attempt to parse average from "rtt min/avg/max/mdev = 0.042/0.042/..."
+        rtt_match = re.search(
+            r"rtt min/avg/max/[^\s]+ = [\d\.]+/([\d\.]+)/[\d\.]+/[\d\.]+ ms",
+            result.stdout
+        )
+        if rtt_match:
+            return float(rtt_match.group(1))
 
-        else:
-            # Non-zero exit code => unreachable
-            return None
+        return None
     except Exception:
         return None
 
@@ -497,7 +496,6 @@ def attempt_ssh_command(host: str,
             - remote_banner: The remote SSH banner (e.g. "SSH-2.0-OpenSSH_8.4"), if retrieved.
     """
     if test_run:
-        # Simulate success in test mode
         return True, f"(Test-run) Would execute [{command}] on {host}", None
 
     saved_output = ""
@@ -521,9 +519,9 @@ def attempt_ssh_command(host: str,
                 keyname} for {host}: {ex}"
             continue
 
-        # Write key to temporary file for Paramiko
         tmpk_name = None
         try:
+            # Write the key to a temporary file for Paramiko
             with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpk:
                 tmpk.write(key_data)
                 tmpk.flush()
@@ -538,14 +536,16 @@ def attempt_ssh_command(host: str,
                 except paramiko.SSHException:
                     continue
                 except Exception as ex_inner:
-                    saved_output += f"\nError parsing key with {
-                        pk_class.__name__} for {host}: {ex_inner}"
+                    saved_output += (
+                        f"\nError parsing key with {pk_class.__name__} "
+                        f"for {host}: {ex_inner}"
+                    )
 
             if pkey_obj is None:
                 saved_output += "\nAll key parsers failed. Possibly unsupported key format."
                 continue
 
-            # Connect using paramiko
+            # Connect via paramiko
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -578,7 +578,7 @@ def attempt_ssh_command(host: str,
                     saved_output += f"\nCould not retrieve SSH banner: {
                         banner_ex}\n"
 
-            # If connected, attempt the command
+            # Execute the command
             try:
                 chan = ssh.get_transport().open_session()
                 chan.settimeout(timeout)
@@ -598,7 +598,8 @@ def attempt_ssh_command(host: str,
                         break
                     if (time.time() - start_time) > timeout:
                         output_buffer.append(
-                            f"(Timed out after {timeout} seconds)\n")
+                            f"(Timed out after {timeout} seconds)\n"
+                        )
                         break
                     time.sleep(0.1)
 
@@ -611,8 +612,10 @@ def attempt_ssh_command(host: str,
                     return True, saved_output, remote_banner
                 else:
                     # Auth success, but command returned non-zero exit code
-                    saved_output += f"\nCommand on {
-                        host} [user={user}] exit code={exit_code}."
+                    saved_output += (
+                        f"\nCommand on {host} [user={
+                            user}] exit code={exit_code}."
+                    )
                     return True, saved_output, remote_banner
             except Exception as ex_run:
                 saved_output += f"\nError executing command on {
@@ -710,7 +713,6 @@ def manage_endpoints(endpoints: List[Endpoint],
             )
             res["ssh_check"] = ssh_success
             if ssh_banner:
-                # If we retrieved the SSH banner, store it
                 res["ssh_version"] = ssh_banner
 
         # If a user command is specified, run it
@@ -884,7 +886,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--filter", action="append", default=[],
-        help="Filter expression (key=value, key>=value, etc.). May be repeated."
+        help="Filter expression (key=value, key>value, etc.). May be repeated."
     )
     parser.add_argument(
         "--threads", type=int,
