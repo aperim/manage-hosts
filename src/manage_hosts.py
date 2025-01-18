@@ -23,7 +23,8 @@ Filtering Comparators Supported:
 
 Additional Exclusion Logic for Shutdown/Reboot:
     - Unless --include-network or MANAGE_HOSTS_INCLUDE_NETWORK is true, devices
-      of type router, switch, or firewall are excluded when shutting down or rebooting.
+      of type router, switch, or firewall are excluded when shutting down or
+      rebooting.
     - Unless --include-power or MANAGE_HOSTS_INCLUDE_POWER is true, devices
       of type ups or pdu are excluded when shutting down or rebooting.
     - Unless --include-storage or MANAGE_HOSTS_INCLUDE_STORAGE is true, devices
@@ -114,10 +115,12 @@ class KeyDefinition:
         my_key_def = KeyDefinition(env_var="MY_BASE64_ENCODED_KEY")
     """
 
-    def __init__(self,
-                 key_data: Optional[str] = None,
-                 file_path: Optional[str] = None,
-                 env_var: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        key_data: Optional[str] = None,
+        file_path: Optional[str] = None,
+        env_var: Optional[str] = None
+    ) -> None:
         """Initialises a KeyDefinition.
 
         Args:
@@ -146,15 +149,17 @@ class Endpoint:
         )
     """
 
-    def __init__(self,
-                 fqdn: str,
-                 dev_type: str,
-                 tags: Dict[str, str],
-                 credentials: List[Dict[str, str]],
-                 host_dependencies: List[str],
-                 ups_dependencies: List[Union[str, Dict[str, str]]],
-                 pdu_dependencies: List[Union[str, Dict[str, str]]],
-                 overrides: Dict[str, str]) -> None:
+    def __init__(
+        self,
+        fqdn: str,
+        dev_type: str,
+        tags: Dict[str, str],
+        credentials: List[Dict[str, str]],
+        host_dependencies: List[str],
+        ups_dependencies: List[Union[str, Dict[str, str]]],
+        pdu_dependencies: List[Union[str, Dict[str, str]]],
+        overrides: Dict[str, str]
+    ) -> None:
         """Initializes an Endpoint instance.
 
         Args:
@@ -261,8 +266,9 @@ def resolve_key(key_def: KeyDefinition) -> str:
     if key_def.env_var:
         env_val = os.environ.get(key_def.env_var)
         if not env_val:
-            raise ValueError(f"Environment variable '{
-                             key_def.env_var}' not found or empty.")
+            raise ValueError(
+                f"Environment variable '{key_def.env_var}' not found or empty."
+            )
         return base64.b64decode(env_val).decode("utf-8")
     if key_def.key_data:
         return key_def.key_data
@@ -464,7 +470,8 @@ def parse_filters(filter_list: List[str]) -> List[Tuple[str, str, str]]:
     """
     result: List[Tuple[str, str, str]] = []
     pattern = re.compile(
-        r"^\s*(\S+)\s*(==|!=|<=|>=|<|>|is not|is|not in|in)\s*(.*)$")
+        r"^\s*(\S+)\s*(==|!=|<=|>=|<|>|is not|is|not in|in)\s*(.*)$"
+    )
 
     for flt in filter_list:
         flt = flt.strip()
@@ -494,6 +501,8 @@ def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) 
     """Determines whether an endpoint matches all specified filter criteria.
 
     Supports filtering by tag keys or the special key 'type' for device type.
+    If the endpoint does not have the specified tag, an empty string is assumed.
+    This allows "purpose!=pve" to include endpoints which have no 'purpose' tag.
 
     Args:
         ep: The Endpoint to test.
@@ -506,9 +515,8 @@ def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) 
         if fkey == "type":
             field_value = ep.dev_type
         else:
-            if fkey not in ep.tags:
-                return False
-            field_value = ep.tags[fkey]
+            # CHANGED LINE: default to an empty string when the tag is missing
+            field_value = ep.tags.get(fkey, "")
 
         if not _compare_values(field_value, fop, fval):
             return False
@@ -555,12 +563,14 @@ def ping_endpoint(host: str, timeout: int = 1) -> Optional[float]:
         return None
 
 
-def attempt_ssh_command(host: str,
-                        credentials: List[Dict[str, str]],
-                        keys_map: Dict[str, KeyDefinition],
-                        command: str,
-                        test_run: bool,
-                        timeout: int = 300) -> Tuple[bool, str, Optional[str]]:
+def attempt_ssh_command(
+    host: str,
+    credentials: List[Dict[str, str]],
+    keys_map: Dict[str, KeyDefinition],
+    command: str,
+    test_run: bool,
+    timeout: int = 300
+) -> Tuple[bool, str, Optional[str]]:
     """Attempts to run a command over SSH with multiple credentials.
 
     Args:
@@ -573,7 +583,7 @@ def attempt_ssh_command(host: str,
 
     Returns:
         A tuple (success, output, remote_banner):
-            - success: True if authentication succeeded at least once.
+            - success: True if authentication succeeded (the command was attempted).
             - output: The combined stdout, stderr, and error messages from the attempts.
             - remote_banner: The remote SSH banner if any (e.g. "SSH-2.0-OpenSSH_8.4").
     """
@@ -716,19 +726,21 @@ def wait_until_unpingable(host: str, timeout: int = 300) -> bool:
     return False
 
 
-def manage_endpoints(endpoints: List[Endpoint],
-                     keys_map: Dict[str, KeyDefinition],
-                     filters: List[Tuple[str, str, str]],
-                     cmd: Optional[str],
-                     do_shutdown: bool,
-                     do_reboot: bool,
-                     test_run: bool,
-                     output_format: str,
-                     timeout_sec: int,
-                     threads: int,
-                     include_network: bool = False,
-                     include_storage: bool = False,
-                     include_power: bool = False) -> Union[str, Dict[str, Dict[str, object]]]:
+def manage_endpoints(
+    endpoints: List[Endpoint],
+    keys_map: Dict[str, KeyDefinition],
+    filters: List[Tuple[str, str, str]],
+    cmd: Optional[str],
+    do_shutdown: bool,
+    do_reboot: bool,
+    test_run: bool,
+    output_format: str,
+    timeout_sec: int,
+    threads: int,
+    include_network: bool = False,
+    include_storage: bool = False,
+    include_power: bool = False
+) -> Union[str, Dict[str, Dict[str, object]]]:
     """Coordinates the main logic: filter endpoints, possibly exclude device types, and operate in waves.
 
     Args:
@@ -929,8 +941,7 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
         max_type_len}}} {{:>5}} {{:>8}} {{:>4}} {{:>9}}"
 
     header = header_fmt.format(
-        "FQDN", "TYPE", "DEPTH", "PING(ms)", "SSH", "OPERATION"
-    )
+        "FQDN", "TYPE", "DEPTH", "PING(ms)", "SSH", "OPERATION")
     lines = [header]
 
     for r in rows:
@@ -946,8 +957,7 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
         op_str = f"{GREEN}✓{RESET}" if op_ok else f"{RED}✗{RESET}"
 
         row_line = line_fmt.format(
-            fqdn, dev_type, depth, ping_str, ssh_str, op_str
-        )
+            fqdn, dev_type, depth, ping_str, ssh_str, op_str)
         lines.append(row_line)
 
     return "\n".join(lines)
@@ -1093,15 +1103,15 @@ def main() -> None:
 
     # Determine if we should include network, storage, power devices
     # based on CLI flags or environment variables.
-    include_network = args.include_network or (
+    include_network_arg = args.include_network or (
         os.environ.get(ENV_INCLUDE_NETWORK, "false").lower() in [
             "true", "1", "yes"]
     )
-    include_storage = args.include_storage or (
+    include_storage_arg = args.include_storage or (
         os.environ.get(ENV_INCLUDE_STORAGE, "false").lower() in [
             "true", "1", "yes"]
     )
-    include_power = args.include_power or (
+    include_power_arg = args.include_power or (
         os.environ.get(ENV_INCLUDE_POWER, "false").lower() in [
             "true", "1", "yes"]
     )
@@ -1118,9 +1128,9 @@ def main() -> None:
         output_format=output_format,
         timeout_sec=timeout_sec,
         threads=chosen_threads,
-        include_network=include_network,
-        include_storage=include_storage,
-        include_power=include_power,
+        include_network=include_network_arg,
+        include_storage=include_storage_arg,
+        include_power=include_power_arg,
     )
 
     print(results)
