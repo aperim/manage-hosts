@@ -14,18 +14,26 @@ Key Features:
       variables (base64-encoded).
     - Endpoints with typed dependencies (hosts, UPS, PDUs), processed in
       depth-based order.
-    - Threaded operations and filtering by tags.
+    - Threaded operations and filtering by tags or device type.
     - Colourised console output or JSON/YAML reports.
     - Per-endpoint overrides for the default shutdown or reboot commands.
 
-This script follows the Google Python Style Guide where possible and includes
-inline docstrings for maintainability.
+Filtering Comparators Supported:
+    ==, !=, <, >, <=, >=, is, is not, in, not in
+
+Additional Exclusion Logic for Shutdown/Reboot:
+    - Unless --include-network or MANAGE_HOSTS_INCLUDE_NETWORK is true, devices
+      of type router, switch, or firewall are excluded when shutting down or rebooting.
+    - Unless --include-power or MANAGE_HOSTS_INCLUDE_POWER is true, devices
+      of type ups or pdu are excluded when shutting down or rebooting.
+    - Unless --include-storage or MANAGE_HOSTS_INCLUDE_STORAGE is true, devices
+      of type storage are excluded when shutting down or rebooting.
 
 Requires:
     Python 3.9+
-    PyYAML (pip install pyyaml)
-    Paramiko (pip install paramiko)
-    Requests (pip install requests)
+    PyYAML
+    Paramiko
+    Requests
     colorama (optional, for coloured console output)
 
 Example:
@@ -70,6 +78,9 @@ ENV_THREADS = "MANAGE_HOSTS_THREADS"
 ENV_FILTER = "MANAGE_HOSTS_FILTER"
 ENV_TEST = "MANAGE_HOSTS_TEST"
 ENV_TIMEOUT = "MANAGE_HOSTS_TIMEOUT"
+ENV_INCLUDE_NETWORK = "MANAGE_HOSTS_INCLUDE_NETWORK"
+ENV_INCLUDE_STORAGE = "MANAGE_HOSTS_INCLUDE_STORAGE"
+ENV_INCLUDE_POWER = "MANAGE_HOSTS_INCLUDE_POWER"
 
 VALID_ENDPOINT_TYPES = {
     "host", "ups", "pdu", "router", "switch", "firewall", "storage"
@@ -90,13 +101,24 @@ INFO_EMOJI = "ℹ️"
 
 
 class KeyDefinition:
-    """Represents a definition of an SSH key, which may be inline, file-based, or environment-based."""
+    """Represents a definition of an SSH key, which may be inline, file-based, or environment-based.
+
+    Example:
+        # Inline key
+        my_key_def = KeyDefinition(key_data="-----BEGIN PRIVATE KEY-----\n...")
+
+        # File-based key
+        my_key_def = KeyDefinition(file_path="/home/user/.ssh/id_rsa")
+
+        # Environment-based key
+        my_key_def = KeyDefinition(env_var="MY_BASE64_ENCODED_KEY")
+    """
 
     def __init__(self,
                  key_data: Optional[str] = None,
                  file_path: Optional[str] = None,
                  env_var: Optional[str] = None) -> None:
-        """Initializes a KeyDefinition.
+        """Initialises a KeyDefinition.
 
         Args:
             key_data: The direct inline content of the key, if defined.
@@ -109,7 +131,20 @@ class KeyDefinition:
 
 
 class Endpoint:
-    """Represents a single endpoint (host, ups, pdu, router, switch, etc.) with typed dependencies."""
+    """Represents a single endpoint (host, ups, pdu, router, switch, etc.) with typed dependencies.
+
+    Example:
+        endpoint = Endpoint(
+            fqdn="server1.local",
+            dev_type="host",
+            tags={"location": "sy3", "critical": "true"},
+            credentials=[{"username": "root", "key": "my_key"}],
+            host_dependencies=["router1.local"],
+            ups_dependencies=[],
+            pdu_dependencies=[],
+            overrides={"shutdown": "sudo systemctl poweroff"}
+        )
+    """
 
     def __init__(self,
                  fqdn: str,
@@ -125,12 +160,11 @@ class Endpoint:
         Args:
             fqdn: Fully Qualified Domain Name of the endpoint.
             dev_type: Device type (e.g., 'host', 'ups', 'pdu', 'router', etc.).
-            tags: A dictionary of string key-value pairs describing the endpoint (e.g. location=sy3).
-            credentials: A list of dictionaries specifying SSH credentials, e.g.
-                [{"username": "root", "key": "my_key_name"}].
-            host_dependencies: A list of FQDN strings that denote which hosts this endpoint depends on.
-            ups_dependencies: A list of UPS dependencies, which can be dicts ({"name": "...", "outlet": "..."}).
-            pdu_dependencies: A list of PDU dependencies, similar structure to ups_dependencies.
+            tags: A dictionary of string key-value pairs describing the endpoint.
+            credentials: A list of dictionaries specifying SSH credentials.
+            host_dependencies: A list of FQDN strings of host dependencies.
+            ups_dependencies: A list of UPS dependencies (strings or dicts with "name", "outlet", etc.).
+            pdu_dependencies: A list of PDU dependencies (strings or dicts).
             overrides: A dict of optional command overrides, e.g. {"shutdown": "...", "reboot": "..."}.
         """
         self.fqdn = fqdn
@@ -177,8 +211,8 @@ def parse_keys(key_section: Dict[str, object]) -> Dict[str, KeyDefinition]:
     """Parses the 'keys' section from YAML into a dictionary of KeyDefinition objects.
 
     Args:
-        key_section: A dict where each key is a key name (string), and the value is either
-            a YAML inline string, or a dict with "file"/"env"/"inline".
+        key_section: A dict where each key is a key name (string), and the value is
+            either a YAML inline string or a dict with "file"/"env"/"inline".
 
     Returns:
         A dict mapping key_name to KeyDefinition.
@@ -262,7 +296,6 @@ def build_endpoints(endpoint_section: List[Dict[str, object]]) -> List[Endpoint]
             raise ValueError(f"Unsupported endpoint type '{
                              dev_type}' for {fqdn}.")
 
-        # Make sure overrides is a dict
         if not isinstance(overrides, dict):
             overrides = {}
 
@@ -302,7 +335,7 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
         # Host dependencies are typically strings of FQDNs.
         result.extend(e.host_dependencies)
 
-        # Handle UPS dependencies, which may be a dict (with "name") or a string.
+        # Handle UPS dependencies (may be dicts or strings).
         for ud in e.ups_dependencies:
             if isinstance(ud, dict):
                 name = ud.get("name")
@@ -311,7 +344,7 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
             elif isinstance(ud, str):
                 result.append(ud)
 
-        # Handle PDU dependencies, same logic as UPS.
+        # Handle PDU dependencies (may be dicts or strings).
         for pd in e.pdu_dependencies:
             if isinstance(pd, dict):
                 name = pd.get("name")
@@ -328,7 +361,7 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
         if stack is None:
             stack = set()
         if fqdn in stack:
-            # Cycle detected, return 0
+            # Cycle detected or invalid ref
             return 0
         stack.add(fqdn)
 
@@ -351,11 +384,77 @@ def calculate_depths(endpoints: List[Endpoint]) -> None:
         e.depth = compute_depth(e.fqdn)
 
 
-def parse_filters(filter_list: List[str]) -> List[Tuple[str, str, str]]:
-    """Parses filters like 'location=sy3' or 'floor>=5' into structured tuples.
+def _compare_values(lhs: str, op: str, rhs: str) -> bool:
+    """Compares two string values with the given operator, supporting both numeric and string logic.
+
+    Supports the following operators:
+        ==, !=, <, >, <=, >=, is, is not, in, not in
+
+    Notes:
+        • For <, >, <=, >=, we attempt numeric parsing; if both lhs and rhs
+          are floats, numeric comparison is performed. Otherwise returns False.
+        • 'is' and 'is not' are treated as string equality/inequality checks.
+        • 'in' and 'not in' perform substring checks on lhs.
 
     Args:
-        filter_list: A list of strings specifying filters, e.g. ["location=sy3", "floor>=5"].
+        lhs: The left-hand-side string value.
+        op: The operator string (one of those above).
+        rhs: The right-hand-side string value.
+
+    Returns:
+        True if the comparison is satisfied, False otherwise.
+    """
+    numeric_ops = {"==", "!=", "<", ">", "<=", ">="}
+    try:
+        lhs_float = float(lhs)
+        rhs_float = float(rhs)
+        could_compare_numerically = True
+    except ValueError:
+        could_compare_numerically = False
+
+    if op in numeric_ops and could_compare_numerically:
+        if op == "==":
+            return lhs_float == rhs_float
+        if op == "!=":
+            return lhs_float != rhs_float
+        if op == "<":
+            return lhs_float < rhs_float
+        if op == ">":
+            return lhs_float > rhs_float
+        if op == "<=":
+            return lhs_float <= rhs_float
+        if op == ">=":
+            return lhs_float >= rhs_float
+    else:
+        # String-based checks
+        if op == "==":
+            return lhs == rhs
+        if op == "!=":
+            return lhs != rhs
+        if op in {"<", "<=", ">", ">="}:
+            return False
+        if op == "is":
+            return lhs == rhs
+        if op == "is not":
+            return lhs != rhs
+        if op == "in":
+            return rhs in lhs
+        if op == "not in":
+            return rhs not in lhs
+
+    return False
+
+
+def parse_filters(filter_list: List[str]) -> List[Tuple[str, str, str]]:
+    """Parses filter expressions into structured tuples (key, operator, value).
+
+    Supported comparators: ==, !=, <, >, <=, >=, is, is not, in, not in
+    If the filter cannot be parsed as one of these, we attempt a fallback:
+      key=value    → (key, "==", value)
+
+    Args:
+        filter_list: A list of strings specifying filters. Example:
+            ["location==sy3", "floor>=5", "type in router"].
 
     Returns:
         A list of (key, operator, value) tuples.
@@ -364,66 +463,55 @@ def parse_filters(filter_list: List[str]) -> List[Tuple[str, str, str]]:
         ValueError: If an invalid filter format is encountered.
     """
     result: List[Tuple[str, str, str]] = []
-    pattern = re.compile(r"^([^=<>]+)([=<>]+)(.+)$")
+    pattern = re.compile(
+        r"^\s*(\S+)\s*(==|!=|<=|>=|<|>|is not|is|not in|in)\s*(.*)$")
 
     for flt in filter_list:
+        flt = flt.strip()
         match = pattern.match(flt)
         if match:
             key, op, val = match.groups()
-            result.append((key.strip(), op.strip(), val.strip()))
+            key = key.strip()
+            op = op.strip()
+            val = val.strip()
+            result.append((key, op, val))
         else:
-            # If no operator is specified, assume '='
-            parts = flt.split("=", maxsplit=1)
-            if len(parts) == 2:
-                k, v = parts
-                result.append((k.strip(), "=", v.strip()))
+            # If no known operator is found, try splitting by '='
+            if '=' in flt:
+                parts = flt.split('=', maxsplit=1)
+                if len(parts) == 2:
+                    k, v = parts
+                    result.append((k.strip(), '==', v.strip()))
+                else:
+                    raise ValueError(f"Cannot parse filter: {flt}")
             else:
                 raise ValueError(f"Cannot parse filter: {flt}")
+
     return result
 
 
 def endpoint_matches_filters(ep: Endpoint, filters: List[Tuple[str, str, str]]) -> bool:
     """Determines whether an endpoint matches all specified filter criteria.
 
+    Supports filtering by tag keys or the special key 'type' for device type.
+
     Args:
         ep: The Endpoint to test.
-        filters: A list of (tag_key, operator, test_value).
+        filters: A list of (key, operator, value) filters. Each must be satisfied (logical AND).
 
     Returns:
         True if the endpoint meets all filter conditions, else False.
     """
     for (fkey, fop, fval) in filters:
-        if fkey not in ep.tags:
-            return False
-
-        val_str = ep.tags[fkey]
-        # Attempt numeric comparison if feasible
-        try:
-            val_float = float(val_str)
-            fval_float = float(fval)
-        except ValueError:
-            val_float = None
-            fval_float = None
-
-        if val_float is not None and fval_float is not None:
-            # Numeric comparison
-            if fop == "=" and (val_float != fval_float):
-                return False
-            elif fop == ">" and not (val_float > fval_float):
-                return False
-            elif fop == "<" and not (val_float < fval_float):
-                return False
-            elif fop == ">=" and not (val_float >= fval_float):
-                return False
-            elif fop == "<=" and not (val_float <= fval_float):
-                return False
+        if fkey == "type":
+            field_value = ep.dev_type
         else:
-            # String comparison
-            if fop == "=" and (val_str != fval):
+            if fkey not in ep.tags:
                 return False
-            if fop in [">", "<", ">=", "<="]:
-                # No meaningful numeric operation on strings
-                return False
+            field_value = ep.tags[fkey]
+
+        if not _compare_values(field_value, fop, fval):
+            return False
 
     return True
 
@@ -433,15 +521,14 @@ def ping_endpoint(host: str, timeout: int = 1) -> Optional[float]:
 
     IMPORTANT:
         - We attempt to parse 'time=...', 'time<...', or 'rtt min/avg...' lines even if
-          the ping command returns a non-zero exit code. Some networks or containers
-          may partially respond but still produce a non-zero exit code.
+          the ping command returns a non-zero exit code.
 
     Args:
         host: The hostname or IP address to ping.
         timeout: Timeout in seconds for the ping.
 
     Returns:
-        A float representing the RTT in milliseconds if we can parse it from the output,
+        A float representing the RTT in milliseconds if we can parse it,
         or None if no RTT is found or an error occurs.
     """
     system = platform.system().lower()
@@ -451,23 +538,18 @@ def ping_endpoint(host: str, timeout: int = 1) -> Optional[float]:
         cmd = ["ping", "-c", "1", "-W", str(timeout), host]
 
     try:
-        # We won't use check=True, so we can parse output even if returncode != 0
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=False)
+        match_time = re.search(r"time[=<>]\s?([\d\.]+)\s?ms", result.stdout)
+        if match_time:
+            return float(match_time.group(1))
 
-        # Attempt to parse a direct single-response line: "time=1.23 ms" or "time<1 ms"
-        match = re.search(r"time[=<>]\s?([\d\.]+)\s?ms", result.stdout)
-        if match:
-            return float(match.group(1))
-
-        # Attempt to parse average from "rtt min/avg/max/mdev = 0.042/0.042/..."
         rtt_match = re.search(
             r"rtt min/avg/max/[^\s]+ = [\d\.]+/([\d\.]+)/[\d\.]+/[\d\.]+ ms",
             result.stdout
         )
         if rtt_match:
             return float(rtt_match.group(1))
-
         return None
     except Exception:
         return None
@@ -483,17 +565,17 @@ def attempt_ssh_command(host: str,
 
     Args:
         host: The hostname or IP address to connect via SSH.
-        credentials: A list of credential dictionaries, e.g. [{"username": "root", "key": "my_key"}].
-        keys_map: A dictionary mapping key names to KeyDefinition objects for resolution.
+        credentials: A list of credential dicts, e.g. [{"username": "root", "key": "my_key"}].
+        keys_map: A dict mapping key names to KeyDefinition objects for resolution.
         command: The command to execute on the remote host.
         test_run: If True, simulates the command without a real SSH connection.
-        timeout: Maximum time (in seconds) to allow for the command to complete.
+        timeout: Maximum time (in seconds) allowed for the command.
 
     Returns:
         A tuple (success, output, remote_banner):
             - success: True if authentication succeeded at least once.
             - output: The combined stdout, stderr, and error messages from the attempts.
-            - remote_banner: The remote SSH banner (e.g. "SSH-2.0-OpenSSH_8.4"), if retrieved.
+            - remote_banner: The remote SSH banner if any (e.g. "SSH-2.0-OpenSSH_8.4").
     """
     if test_run:
         return True, f"(Test-run) Would execute [{command}] on {host}", None
@@ -505,13 +587,11 @@ def attempt_ssh_command(host: str,
         user = cred.get("username", "root")
         keyname = cred.get("key", "")
 
-        # Check if the key is known
         if keyname not in keys_map:
             saved_output += f"\nNo matching key '{
                 keyname}' found for {host}. Skipping."
             continue
 
-        # Attempt to load key data
         try:
             key_data = resolve_key(keys_map[keyname])
         except Exception as ex:
@@ -521,13 +601,11 @@ def attempt_ssh_command(host: str,
 
         tmpk_name = None
         try:
-            # Write the key to a temporary file for Paramiko
             with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpk:
                 tmpk.write(key_data)
                 tmpk.flush()
                 tmpk_name = tmpk.name
 
-            # Try multiple paramiko key classes
             pkey_obj = None
             for pk_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
                 try:
@@ -537,15 +615,14 @@ def attempt_ssh_command(host: str,
                     continue
                 except Exception as ex_inner:
                     saved_output += (
-                        f"\nError parsing key with {pk_class.__name__} "
-                        f"for {host}: {ex_inner}"
+                        f"\nError parsing key with {pk_class.__name__}"
+                        f" for {host}: {ex_inner}"
                     )
 
             if pkey_obj is None:
                 saved_output += "\nAll key parsers failed. Possibly unsupported key format."
                 continue
 
-            # Connect via paramiko
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -569,7 +646,6 @@ def attempt_ssh_command(host: str,
                 ssh.close()
                 continue
 
-            # Retrieve the banner (e.g. SSH-2.0-OpenSSH_8.4)
             transport = ssh.get_transport()
             if transport:
                 try:
@@ -578,9 +654,8 @@ def attempt_ssh_command(host: str,
                     saved_output += f"\nCould not retrieve SSH banner: {
                         banner_ex}\n"
 
-            # Execute the command
             try:
-                chan = ssh.get_transport().open_session()
+                chan = transport.open_session()
                 chan.settimeout(timeout)
                 chan.exec_command(command)
 
@@ -598,8 +673,7 @@ def attempt_ssh_command(host: str,
                         break
                     if (time.time() - start_time) > timeout:
                         output_buffer.append(
-                            f"(Timed out after {timeout} seconds)\n"
-                        )
+                            f"(Timed out after {timeout} seconds)\n")
                         break
                     time.sleep(0.1)
 
@@ -608,25 +682,19 @@ def attempt_ssh_command(host: str,
 
                 saved_output += "".join(output_buffer)
                 if exit_code == 0:
-                    # Successful command execution
                     return True, saved_output, remote_banner
                 else:
-                    # Auth success, but command returned non-zero exit code
-                    saved_output += (
-                        f"\nCommand on {host} [user={
-                            user}] exit code={exit_code}."
-                    )
+                    saved_output += f"\nCommand on {
+                        host} [user={user}] exit code={exit_code}."
                     return True, saved_output, remote_banner
             except Exception as ex_run:
                 saved_output += f"\nError executing command on {
                     host}: {ex_run}"
                 ssh.close()
         finally:
-            # Clean up the temporary file
             if tmpk_name and os.path.exists(tmpk_name):
                 os.remove(tmpk_name)
 
-    # No credentials succeeded
     return False, saved_output, remote_banner
 
 
@@ -634,11 +702,11 @@ def wait_until_unpingable(host: str, timeout: int = 300) -> bool:
     """Waits until the given host is no longer reachable via ping or until timeout.
 
     Args:
-        host: The hostname or IP to test.
-        timeout: Total number of seconds to wait for the host to become unreachable.
+        host: The hostname or IP.
+        timeout: Time in seconds to wait for the host to become unreachable.
 
     Returns:
-        True if the host became unreachable before the timeout, else False.
+        True if the host became unreachable within the timeout; otherwise False.
     """
     start = time.time()
     while (time.time() - start) < timeout:
@@ -657,34 +725,54 @@ def manage_endpoints(endpoints: List[Endpoint],
                      test_run: bool,
                      output_format: str,
                      timeout_sec: int,
-                     threads: int) -> Union[str, Dict[str, Dict[str, object]]]:
-    """Coordinates the main logic: filter endpoints, order them by depth, and operate in waves.
+                     threads: int,
+                     include_network: bool = False,
+                     include_storage: bool = False,
+                     include_power: bool = False) -> Union[str, Dict[str, Dict[str, object]]]:
+    """Coordinates the main logic: filter endpoints, possibly exclude device types, and operate in waves.
 
     Args:
         endpoints: The list of all Endpoint objects parsed from config.
         keys_map: A dictionary mapping key names to KeyDefinition values.
-        filters: A list of (tag_key, operator, value) filters to further select endpoints.
+        filters: A list of (tag_key or "type", operator, value) filters.
         cmd: If not None, an arbitrary command to run on each endpoint in wave order.
-        do_shutdown: Whether we're performing a global shutdown across endpoints.
-        do_reboot: Whether we're performing a global reboot across endpoints.
+        do_shutdown: Whether to perform a global shutdown across endpoints.
+        do_reboot: Whether to perform a global reboot across endpoints.
         test_run: If True, destructive actions become echo statements.
         output_format: One of "text", "json", or "yaml".
-        timeout_sec: Timeout (in seconds) for remote operations (ssh or wait cycles).
+        timeout_sec: Timeout (in seconds) for remote operations (SSH or wait cycles).
         threads: Number of concurrent worker threads to use when operating on a wave.
+        include_network: Whether to include router, switch, firewall in a shutdown/reboot.
+        include_storage: Whether to include storage devices in a shutdown/reboot.
+        include_power: Whether to include ups, pdu in a shutdown/reboot.
 
     Returns:
-        Either a string of the final text/JSON/YAML output or a dictionary if further processing is needed.
+        Either a string of the final text/JSON/YAML output or a dictionary for further usage.
     """
-    # Filter endpoints by tags
+    # Filter endpoints by user filters
     filtered = [
         ep for ep in endpoints if endpoint_matches_filters(ep, filters)]
-    # Sort by descending depth to operate on the deepest dependencies (leaf nodes) first
+
+    # If shutting down or rebooting, exclude certain device types unless explicitly included
+    if do_shutdown or do_reboot:
+        final_filtered: List[Endpoint] = []
+        for ep in filtered:
+            if ep.dev_type in {"router", "switch", "firewall"} and not include_network:
+                continue
+            if ep.dev_type == "storage" and not include_storage:
+                continue
+            if ep.dev_type in {"ups", "pdu"} and not include_power:
+                continue
+            final_filtered.append(ep)
+        filtered = final_filtered
+
+    # Sort by descending depth (highest dependencies first)
     filtered.sort(key=lambda e: e.depth, reverse=True)
 
     results: Dict[str, Dict[str, object]] = {}
 
     def worker(e: Endpoint) -> None:
-        """Process a single endpoint in a wave: ping, optional SSH check, then operation."""
+        """Process a single endpoint in a wave: ping, optional SSH test, then operation."""
         res: Dict[str, object] = {
             "fqdn": e.fqdn,
             "type": e.dev_type,
@@ -696,12 +784,12 @@ def manage_endpoints(endpoints: List[Endpoint],
             "operation_success": False,
         }
 
-        # Perform a ping test
+        # Ping
         rtt = ping_endpoint(e.fqdn, timeout=1)
         if rtt is not None:
             res["ping_rtt_ms"] = rtt
 
-        # If credentials exist, do a lightweight SSH test
+        # Lightweight SSH check
         if e.credentials:
             ssh_success, _, ssh_banner = attempt_ssh_command(
                 host=e.fqdn,
@@ -715,7 +803,7 @@ def manage_endpoints(endpoints: List[Endpoint],
             if ssh_banner:
                 res["ssh_version"] = ssh_banner
 
-        # If a user command is specified, run it
+        # Arbitrary command
         if cmd is not None:
             success, out, banner = attempt_ssh_command(
                 host=e.fqdn,
@@ -730,20 +818,22 @@ def manage_endpoints(endpoints: List[Endpoint],
             if banner:
                 res["ssh_version"] = banner
 
+        # Shutdown logic
         elif do_shutdown:
-            # Perform a shutdown
             default_shutdown_cmd = "sudo shutdown -h now"
-            shutdown_cmd = (
-                e.overrides.get("shutdown", default_shutdown_cmd)
-                if not test_run
-                else "echo 'I would shutdown now'"
-            )
+            if test_run:
+                shutdown_cmd = f"echo 'I would shutdown now (test-run) on {
+                    e.fqdn}'"
+            else:
+                shutdown_cmd = e.overrides.get(
+                    "shutdown", default_shutdown_cmd)
+
             success, out, banner = attempt_ssh_command(
                 host=e.fqdn,
                 credentials=e.credentials,
                 keys_map=keys_map,
                 command=shutdown_cmd,
-                test_run=False,  # We'll handle "echo" ourselves via test_run
+                test_run=False,
                 timeout=15
             )
             res["operation_output"] = out
@@ -751,7 +841,6 @@ def manage_endpoints(endpoints: List[Endpoint],
             if banner:
                 res["ssh_version"] = banner
 
-            # Wait until unpingable
             if success and not test_run:
                 offline = wait_until_unpingable(e.fqdn, timeout_sec)
                 if not offline:
@@ -759,14 +848,15 @@ def manage_endpoints(endpoints: List[Endpoint],
                         timeout_sec}s."
                     res["operation_success"] = False
 
+        # Reboot logic
         elif do_reboot:
-            # Perform a reboot
             default_reboot_cmd = "sudo shutdown -r now"
-            reboot_cmd = (
-                e.overrides.get("reboot", default_reboot_cmd)
-                if not test_run
-                else "echo 'I would reboot now'"
-            )
+            if test_run:
+                reboot_cmd = f"echo 'I would reboot now (test-run) on {
+                    e.fqdn}'"
+            else:
+                reboot_cmd = e.overrides.get("reboot", default_reboot_cmd)
+
             success, out, banner = attempt_ssh_command(
                 host=e.fqdn,
                 credentials=e.credentials,
@@ -780,7 +870,6 @@ def manage_endpoints(endpoints: List[Endpoint],
             if banner:
                 res["ssh_version"] = banner
 
-            # Also wait until unpingable, like shutdown
             if success and not test_run:
                 offline = wait_until_unpingable(e.fqdn, timeout_sec)
                 if not offline:
@@ -788,10 +877,9 @@ def manage_endpoints(endpoints: List[Endpoint],
                         timeout_sec}s."
                     res["operation_success"] = False
 
-        # Save final result
         results[e.fqdn] = res
 
-    # Process endpoints in waves grouped by depth
+    # Process in waves by depth
     distinct_depths = sorted({ep.depth for ep in filtered}, reverse=True)
     for depth_lvl in distinct_depths:
         wave_endpoints = [ep for ep in filtered if ep.depth == depth_lvl]
@@ -799,7 +887,7 @@ def manage_endpoints(endpoints: List[Endpoint],
             futures = [executor.submit(worker, wep) for wep in wave_endpoints]
             concurrent.futures.wait(futures)
 
-    # Return results as JSON, YAML, or text
+    # Format output
     if output_format == "json":
         try:
             import json
@@ -826,10 +914,8 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
         A string containing formatted table output.
     """
     rows = list(results.values())
-    # Sort by FQDN alphabetically for stable output
     rows.sort(key=lambda x: str(x["fqdn"]))
 
-    # Determine column widths for alignment
     max_fqdn_len = max((len(str(r["fqdn"])) for r in rows), default=20)
     max_fqdn_len = max(max_fqdn_len, 20)
     max_type_len = max((len(str(r["type"])) for r in rows), default=8)
@@ -842,12 +928,11 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
     line_fmt = f"{{:<{max_fqdn_len}}} {{:<{
         max_type_len}}} {{:>5}} {{:>8}} {{:>4}} {{:>9}}"
 
-    # Construct the header line
     header = header_fmt.format(
-        "FQDN", "TYPE", "DEPTH", "PING(ms)", "SSH", "OPERATION")
+        "FQDN", "TYPE", "DEPTH", "PING(ms)", "SSH", "OPERATION"
+    )
     lines = [header]
 
-    # Populate each row
     for r in rows:
         fqdn = str(r["fqdn"])
         dev_type = str(r["type"])
@@ -856,13 +941,13 @@ def build_text_report(results: Dict[str, Dict[str, object]]) -> str:
         ssh_ok = r["ssh_check"]
         op_ok = r["operation_success"]
 
-        # Format each column
         ping_str = f"{ping_ms:.2f}" if ping_ms is not None else "N/A"
         ssh_str = f"{GREEN}OK{RESET}" if ssh_ok else f"{RED}NO{RESET}"
         op_str = f"{GREEN}✓{RESET}" if op_ok else f"{RED}✗{RESET}"
 
         row_line = line_fmt.format(
-            fqdn, dev_type, depth, ping_str, ssh_str, op_str)
+            fqdn, dev_type, depth, ping_str, ssh_str, op_str
+        )
         lines.append(row_line)
 
     return "\n".join(lines)
@@ -872,10 +957,11 @@ def main() -> None:
     """Main entry point of the manage_hosts script.
 
     Parses CLI arguments, loads config, builds endpoints, calculates depths,
-    applies filters, and processes to provide checks, commands, or power actions.
+    applies filters, optionally excludes certain device types during shutdown/reboot,
+    and processes checks, commands, or power actions.
     """
     parser = argparse.ArgumentParser(
-        description="Manage Hosts Script - controlling endpoints (e.g. host, ups, router...)"
+        description="Manage Hosts Script - controlling endpoints (host, ups, router, etc.)"
     )
     parser.add_argument(
         "--config", "-c",
@@ -886,7 +972,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--filter", action="append", default=[],
-        help="Filter expression (key=value, key>value, etc.). May be repeated."
+        help=(
+            "Filter expression (supports '==', '!=', '<', '>', '<=', '>=', "
+            "'is', 'is not', 'in', 'not in'). May be repeated. If no operator is "
+            "detected, '=' is assumed. Use 'type' as the key for device-type filters."
+        )
     )
     parser.add_argument(
         "--threads", type=int,
@@ -918,21 +1008,32 @@ def main() -> None:
     )
     parser.add_argument(
         "--timeout", type=int,
-        help="Timeout in seconds for commands or shutdown. Defaults to 300."
+        help="Timeout in seconds for commands or shutdown/reboot. Defaults to 300."
+    )
+
+    # New flags for including certain device types
+    parser.add_argument(
+        "--include-network", action="store_true",
+        help="Include network devices (router, switch, firewall) in shutdown or reboot."
+    )
+    parser.add_argument(
+        "--include-storage", action="store_true",
+        help="Include storage devices in shutdown or reboot."
+    )
+    parser.add_argument(
+        "--include-power", action="store_true",
+        help="Include power devices (ups, pdu) in shutdown or reboot."
     )
 
     args = parser.parse_args()
 
-    # Validate that the user can't specify both shutdown and reboot in one run
     if args.shutdown and args.reboot:
         parser.error(
             "Cannot specify both --shutdown and --reboot at the same time.")
 
-    # Resolve configuration source
     config_source = args.config or os.environ.get(
         ENV_CONFIG, DEFAULT_CONFIG_FILE)
 
-    # Load YAML config
     try:
         config_data = load_yaml_config(config_source)
     except Exception as ex:
@@ -943,22 +1044,17 @@ def main() -> None:
         print(f"{ERROR_EMOJI} No valid data in config file/URL.")
         sys.exit(1)
 
-    # Parse SSH keys
     raw_keys = config_data.get("keys", {})
     if not isinstance(raw_keys, dict):
         raw_keys = {}
     keys_map = parse_keys(raw_keys)
 
-    # Parse endpoints
     endpoint_section = config_data.get("endpoints", [])
     if not isinstance(endpoint_section, list):
         endpoint_section = []
     endpoints = build_endpoints(endpoint_section)
-
-    # Calculate dependency depths
     calculate_depths(endpoints)
 
-    # Merge filter arguments from CLI and environment
     combined_filters: List[str] = list(args.filter)
     env_filter_str = os.environ.get(ENV_FILTER)
     if env_filter_str:
@@ -972,22 +1068,18 @@ def main() -> None:
 
     parsed_filter_tuples = parse_filters(combined_filters)
 
-    # Determine concurrency
     import multiprocessing
     cpu_count = multiprocessing.cpu_count()
     default_threads = max(cpu_count - 1, 1)
     chosen_threads = args.threads or int(
         os.environ.get(ENV_THREADS, default_threads))
 
-    # Determine test mode
     test_run = args.test or (
         os.environ.get(ENV_TEST, "false").lower() in ["true", "1", "yes"]
     )
 
-    # Determine timeout
     timeout_sec = args.timeout or int(os.environ.get(ENV_TIMEOUT, "300"))
 
-    # Determine output format
     if args.json:
         output_format = "json"
     elif args.yaml:
@@ -995,13 +1087,26 @@ def main() -> None:
     else:
         output_format = "text"
 
-    # Operations specified by arguments
     user_cmd = args.command
     do_shutdown = args.shutdown
     do_reboot = args.reboot
 
-    # If no operation is specified, we effectively do a "check" (ping + SSH).
-    # This is handled in manage_endpoints with cmd=None, do_shutdown=False, do_reboot=False.
+    # Determine if we should include network, storage, power devices
+    # based on CLI flags or environment variables.
+    include_network = args.include_network or (
+        os.environ.get(ENV_INCLUDE_NETWORK, "false").lower() in [
+            "true", "1", "yes"]
+    )
+    include_storage = args.include_storage or (
+        os.environ.get(ENV_INCLUDE_STORAGE, "false").lower() in [
+            "true", "1", "yes"]
+    )
+    include_power = args.include_power or (
+        os.environ.get(ENV_INCLUDE_POWER, "false").lower() in [
+            "true", "1", "yes"]
+    )
+
+    # Perform the main operation
     results = manage_endpoints(
         endpoints=endpoints,
         keys_map=keys_map,
@@ -1012,10 +1117,12 @@ def main() -> None:
         test_run=test_run,
         output_format=output_format,
         timeout_sec=timeout_sec,
-        threads=chosen_threads
+        threads=chosen_threads,
+        include_network=include_network,
+        include_storage=include_storage,
+        include_power=include_power,
     )
 
-    # Print final results
     print(results)
 
 

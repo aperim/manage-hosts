@@ -1,71 +1,61 @@
 # Manage Hosts Script
 
-A robust Python script to manage a list of hosts, PDUs, UPS devices, routers, switches, and more. This script supports filtering endpoints by tags, establishing SSH connections with multiple credentials, shutting down endpoints, executing arbitrary commands, and reflecting on dependencies (such as UPS, PDU, host dependencies) with a depth-based approach.
+A robust Python script to manage a list of hosts, PDUs, UPS devices, routers, switches, and more. This script supports filtering endpoints by tags or device type, establishing SSH connections with multiple credentials, shutting down endpoints, executing arbitrary commands, and reflecting on dependencies (such as UPS, PDU, host dependencies) with a depth-based approach.
 
-Updated Features Include:
-1. Endpoints may define a "shutdown" override command (shall replace the default "sudo shutdown -h now").  
-2. Endpoints may define a "reboot" override command (shall replace the default "sudo shutdown -r now").  
-3. A new command-line parameter "--reboot", similar to "--shutdown", to reboot endpoints instead of shutting them down.
-
-This script is suitable for both macOS (Darwin) and Debian (Linux) based operating systems. It uses Python 3.9+ features and is designed following (as closely as possible) the Google Python Style Guide.
+This script is suitable for both macOS (Darwin) and Linux-based operating systems. It uses Python 3.9+ features and is designed following (as closely as possible) the Google Python Style Guide.
 
 --------------------------------------------------------------------------------
 ## Key Functionality
 
-1. Configuration Loading from YAML:
+1. Configuration Loading from YAML:  
    • By default, attempts to load "hosts.yaml" in the same directory.  
    • Can be overridden using the "--config/-c" command-line argument or the MANAGE_HOSTS_CONFIG environment variable.  
    • Can load from a local file path or an HTTPS URL (HTTP is disallowed).
 
-2. SSH Key Management:
-   • Private keys can be provided directly as a string, via a file reference, or via an environment variable (assumed base64-encoded).  
+2. SSH Key Management:  
+   • Private keys can be provided directly in the YAML, via a file reference, or via an environment variable (assumed base64-encoded).  
    • Multiple SSH credentials can be defined per endpoint, tried in order until one succeeds.
 
-3. Endpoint Inventory:
+3. Endpoint Inventory:  
    • Endpoints accept a "type" from the set {host, ups, pdu, router, switch, firewall, storage}.  
-   • Endpoints can have zero or more credentials and zero or more tags.  
+   • Endpoints can define multiple credentials and multiple tags.  
    • Endpoints can define dependencies on other hosts, UPS systems, and PDUs.  
-   • Depth-based ordering ensures that leaf nodes (hosts that depend on nothing else) get actioned first; ancestors (like routers, or more central devices) only get actioned once their children are finished.
+   • Depth-based ordering ensures leaf nodes (hosts with no dependencies) get actions first, with parents (more central devices) waiting until children are complete.
 
-4. Overrides for Shutdown and Reboot:
-   • If an endpoint has an "overrides" entry with a "shutdown" key, that command is used for shutdown instead of the default "sudo shutdown -h now".  
-   • If an endpoint has an "overrides" entry with a "reboot" key, that command is used for reboot instead of the default "sudo shutdown -r now".  
-   • For example, an endpoint can specify:  
-       overrides:  
-         shutdown: "systemctl poweroff -i"  
-         reboot: "systemctl reboot"  
-   • If no override is defined, the default commands are used.
+4. Overrides for Shutdown and Reboot:  
+   • If an endpoint has an "overrides" entry with a "shutdown" key, that command is used instead of the default "sudo shutdown -h now".  
+   • If an endpoint has an "overrides" entry with a "reboot" key, that command is used instead of the default "sudo shutdown -r now".  
 
-5. Filtering:
-   • Supports multiple --filter arguments like "--filter location=sy3 --filter critical=true --filter building=3 --filter floor>=5".  
-   • Entails (tag_key, operator, value).  
-   • The environment variable MANAGE_HOSTS_FILTER may also store a YAML array of filter criteria.
+5. Filtering:  
+   • Supports multiple --filter arguments like "--filter location=sy3 --filter critical=true --filter type==router --filter floor>=5".  
+   • Each --filter is combined with a logical AND.  
+   • The following comparators are supported:  
+       ==, !=, <, >, <=, >=, is, is not, in, not in  
+   • When both sides can be parsed as numeric, <, <=, >, >= become numeric comparisons; otherwise they return no match.  
+   • "is" and "is not" act like string equality or inequality.  
+   • "in" and "not in" perform substring membership checks on the endpoint’s string value.  
+   • If you wish to filter by device type, use "type" as the filter key.
 
-6. Threaded Operations:
-   • The script divides work among threads.  
-   • The default thread count is (CPU count - 1) or 1 if the CPU count is very low.  
+6. Threaded Operations:  
+   • The script divides its work among threads, defaulting to (CPU count - 1) or 1 if the CPU count is low.  
    • Can be overridden via --threads or the MANAGE_HOSTS_THREADS environment variable.  
    • Endpoints are processed wave-by-wave, from the greatest depth to zero.
 
-7. Reporting:
-   • Output is a colourised, human-friendly ASCII table by default.  
+7. Reporting:  
+   • By default, output is a colourised, human-friendly ASCII table in the console.  
    • Use --json or --yaml to get structured JSON or YAML output.  
 
-8. Operational Modes:
-   • No options: Perform basic checks (ping + test SSH) on each endpoint.  
+8. Operational Modes:  
+   • No options: Perform basic checks (ping + SSH) on each endpoint.  
    • --test / MANAGE_HOSTS_TEST: Dry run mode, substituting destructive commands with echo statements.  
-   • --shutdown: Gracefully shut down endpoints in dependency order, waiting for them to become unreachable.  
-       – If an endpoint has a "shutdown" override, that command is used instead of "sudo shutdown -h now".  
-   • --reboot: Gracefully reboot endpoints in dependency order, waiting for them to become unreachable.  
-       – If an endpoint has a "reboot" override, that command is used instead of "sudo shutdown -r now".  
+   • --shutdown: Gracefully shut down endpoints in descending dependency order, waiting for them to become unreachable.  
+   • --reboot: Gracefully reboot endpoints in descending dependency order, waiting for them to become unreachable.  
    • --command / -x: Executes an arbitrary command on all endpoints, wave-by-wave.  
 
-   NOTE: --shutdown and --reboot cannot be combined in the same operation.  
+   Note: --shutdown and --reboot cannot both be used in the same run.
 
 --------------------------------------------------------------------------------
 ## Example Configuration: hosts.yaml
-
-Below is an example YAML file supporting all available features:
 
 ```yaml
 # SSH Keys
@@ -114,7 +104,7 @@ endpoints:
     ups_dependencies: []
     pdu_dependencies: []
     overrides:
-      # This endpoint uses the default shutdown and reboot commands
+      # Uses default shutdown and reboot commands
 
   - fqdn: ups1.local
     type: ups
@@ -127,39 +117,32 @@ endpoints:
     # No overrides, so any shutdown command is a no-op if credentials are missing
 ```
 
-In the above example:
-• "server1.local" is a host that depends on "router1.local" being up, and it also depends on "ups1.local" for power.  
-• "server1.local" has a custom shutdown or reboot command (via overrides).  
-• "router1.local" uses default commands if requested to shut down or reboot.  
-• "ups1.local" has no credentials and no shutdown or reboot override.  
-
 --------------------------------------------------------------------------------
 ## Usage Examples
 
 • Default operation (ping + SSH check):  
-  » python manage_hosts.py
+  python manage_hosts.py
 
 • Override config path (local file) and test run:  
-  » python manage_hosts.py --config /etc/hostmanage/hosts.yaml --test
-
-• Override config via HTTPS URL (non-SSL is invalid):  
-  » export MANAGE_HOSTS_CONFIG="https://example.com/myhosts.yaml"  
-  » python manage_hosts.py
+  python manage_hosts.py --config /etc/hostmanage/hosts.yaml --test
 
 • Filtering and threads:  
-  » python manage_hosts.py --filter location=sy3 --filter critical=true --threads 5
+  python manage_hosts.py --filter location=sy3 --filter critical=true --threads 5
+
+• Filter by device type:  
+  python manage_hosts.py --filter "type==router"
 
 • Executing a command on all endpoints (deepest dependencies first):  
-  » python manage_hosts.py --command "sudo apt-get update && sudo apt-get -y full-upgrade"
+  python manage_hosts.py --command "sudo apt-get update && sudo apt-get -y full-upgrade"
 
-• Shutting down all hosts (deeper dependencies shut down first):  
-  » python manage_hosts.py --shutdown
+• Shutting down all hosts (deepest dependencies first):  
+  python manage_hosts.py --shutdown
 
-• Rebooting all hosts (applies "reboot" logic, if overridden or default):  
-  » python manage_hosts.py --reboot
+• Rebooting all hosts:  
+  python manage_hosts.py --reboot
 
 • Generating JSON output:  
-  » python manage_hosts.py --filter critical=true --json
+  python manage_hosts.py --filter critical=true --json
 
 --------------------------------------------------------------------------------
 ## Notes
@@ -168,6 +151,4 @@ In the above example:
 • In --test mode, no destructive commands (shutdown/reboot) are actually executed.  
 • Timeout for remote operations defaults to 300 seconds; can be overridden by --timeout or MANAGE_HOSTS_TIMEOUT.  
 • Dependency ordering ensures child endpoints are addressed first.  
-• The script is idempotent with regard to local file changes; repeated runs do not modify the YAML file.
-
---------------------------------------------------------------------------------
+• The script is idempotent regarding local file changes.  
